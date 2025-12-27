@@ -59,7 +59,8 @@ pub async fn deploy_account(
     rpc_url: &str, 
     class_hash_hex: &str,
     private_key: Felt, 
-    public_key: Felt
+    public_key: Felt,
+    log_msg: &str
 ) -> Result<String> {
     let url = Url::parse(rpc_url)?;
     let provider = JsonRpcClient::new(HttpTransport::new(url));
@@ -75,7 +76,7 @@ pub async fn deploy_account(
     ).await?;
 
     let deployment = factory.deploy_v3(public_key);
-    println!("⚙️  正在发送 V3 部署交易...");
+    println!("{}", log_msg);
     let result = deployment.send().await?;
 
     Ok(format!("{:#x}", result.transaction_hash))
@@ -88,7 +89,8 @@ pub async fn transfer_strk(
     sender_address: &str,
     private_key: Felt,
     recipient_address: &str,
-    amount: f64
+    amount: f64,
+    log_msgs: (&str, &str, &str) // (building_msg, target_label, amount_label)
 ) -> Result<String> {
     let url = Url::parse(rpc_url)?;
     let provider = JsonRpcClient::new(HttpTransport::new(url));
@@ -123,9 +125,9 @@ pub async fn transfer_strk(
         ],
     };
 
-    println!("⚙️  正在构建转账交易...");
-    println!("   目标: {}", recipient_address);
-    println!("   金额: {} STRK", amount);
+    println!("{}", log_msgs.0);
+    println!("{}{}", log_msgs.1, recipient_address);
+    println!("{}{}", log_msgs.2, amount);
 
     // 4. 发送交易 (V3)
     let result = account

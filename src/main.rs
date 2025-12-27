@@ -1,6 +1,7 @@
 mod keystore;
 mod network;
 mod config;
+mod i18n;
 
 use clap::{Parser, Subcommand};
 use keystore::Keystore;
@@ -17,7 +18,7 @@ use starknet::signers::SigningKey;
 #[command(name = "stark-ark")]
 #[command(about = "Starknet CLI Wallet in Rust", long_about = None)]
 struct Cli {
-    /// 指定 keystore 文件路径
+    /// Specify keystore file path
     #[arg(short, long, global = true)]
     keystore: Option<String>,
 
@@ -27,29 +28,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 📜 列出所有账户
+    /// 📜 List all accounts
     List,
-    /// ✨ 创建新账户
+    /// ✨ Create new account
     New,
-    /// 💰 查询余额 (需要指定账户序号)
+    /// 💰 Check balance (requires account index)
     Balance {
         #[arg(short, long)]
         index: usize,
     },
-    /// 🚀 激活/部署账户 (需要指定账户序号)
+    /// 🚀 Activate/Deploy account (requires account index)
     Deploy {
         #[arg(short, long)]
         index: usize,
     },
-    /// 💸 转账
+    /// 💸 Transfer funds
     Transfer {
-        /// 发送方账户序号
+        /// Sender account index
         #[arg(short, long)]
         from_index: usize,
-        /// 接收方地址 (Hex)
+        /// Recipient address (Hex)
         #[arg(short, long)]
         to: String,
-        /// 金额 (STRK)
+        /// Amount (STRK)
         #[arg(short, long)]
         amount: f64,
     },
@@ -68,8 +69,8 @@ async fn main() -> Result<()> {
 
     // 如果没有 keystore，先初始化
     if !Path::new(&cfg.keystore_file).exists() {
-        println!("⚠️  未找到钱包文件，正在初始化...");
-        initialize_new_wallet(&cfg.keystore_file)?;
+        println!("{}", cfg.messages.wallet_not_found);
+        initialize_new_wallet(&cfg.keystore_file, &cfg.messages)?;
     }
 
     // 根据是否有参数决定运行模式
@@ -85,47 +86,56 @@ async fn main() -> Result<()> {
 
 async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
     // 修复点：这里接收 3 个返回值，忽略密码 (_)
-    let (keystore, private_keys, password) = load_and_decrypt(&cfg.keystore_file)?;
+    let (keystore, private_keys, password) = load_and_decrypt(&cfg.keystore_file, &cfg.messages)?;
 
     match cmd {
         Commands::List => {
-            println!("📋 账户列表:");
+            println!("{}", cfg.messages.account_list);
             for (i, pk) in private_keys.iter().enumerate() {
                 let addr = Keystore::derive_address(pk, &cfg.oz_class_hash)?;
                 println!("   [{}] {}", i, addr);
             }
         },
         Commands::New => {
-            println!("⚙️  正在生成新账户...");
+            println!("{}", cfg.messages.generating_new_account);
             // 使用刚才读取到的密码直接加密
             let updated = Keystore::add_new_account(&keystore, &password)?;
             save_keystore(&cfg.keystore_file, &updated)?;
-            println!("🎉 新账户已创建！");
+            println!("{}", cfg.messages.new_account_created);
         },
         Commands::Balance { index } => {
             let (addr, _, _) = get_account_info(index, &private_keys, cfg)?;
             let balance = network::get_balance(&cfg.rpc_url, &cfg.strk_contract_address, &addr).await?;
-            println!("💰 账户 [{}] 余额: {:.4} STRK", index, balance);
+            let msg = cfg.messages.balance_fmt
+                .replace("{index}", &index.to_string())
+                .replace("{balance}", &format!("{:.4}", balance));
+            println!("{}", msg);
         },
         Commands::Deploy { index } => {
             let (addr, priv_felt, pub_felt) = get_account_info(index, &private_keys, cfg)?;
-            println!("🚀 正在激活账户: {}", addr);
-            let tx = network::deploy_account(&cfg.rpc_url, &cfg.oz_class_hash, priv_felt, pub_felt).await?;
-            println!("✅ 交易已发送: {}", tx);
+            println!("{}{}", cfg.messages.activating_account, addr);
+            let tx = network::deploy_account(&cfg.rpc_url, &cfg.oz_class_hash, priv_felt, pub_felt, &cfg.messages.network_deploying).await?;
+            println!("{}{}", cfg.messages.tx_sent, tx);
         },
         Commands::Transfer { from_index, to, amount } => {
-            validate_target_address(to)?;
+            validate_target_address(to, &cfg.messages)?;
             let (addr, priv_felt, _) = get_account_info(from_index, &private_keys, cfg)?;
-            println!("💸 正在从 [{}] 发送 {} STRK 到 {}", from_index, amount, to);
+            let msg = cfg.messages.sending_transfer_fmt
+                .replace("{from}", &from_index.to_string())
+                .replace("{amount}", &amount.to_string())
+                .replace("{to}", to);
+            println!("{}", msg);
+            
             let tx = network::transfer_strk(
                 &cfg.rpc_url, 
                 &cfg.strk_contract_address, 
                 &addr, 
                 priv_felt, 
                 to, 
-                *amount
+                *amount,
+                (&cfg.messages.network_building_tx, &cfg.messages.network_target_label, &cfg.messages.network_amount_label)
             ).await?;
-            println!("✅ 转账成功: {}", tx);
+            println!("{}{}", cfg.messages.transfer_success, tx);
         }
     }
     Ok(())
@@ -134,7 +144,7 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
 // 辅助：从索引获取账户信息
 fn get_account_info(index: &usize, keys: &[String], cfg: &Config) -> Result<(String, Felt, Felt)> {
     if *index >= keys.len() {
-        return Err(anyhow::anyhow!("索引越界！你有 {} 个账户，最大索引是 {}", keys.len(), keys.len() - 1));
+        return Err(anyhow::anyhow!("{}", cfg.messages.index_out_of_bounds));
     }
     let pk_hex = &keys[*index];
     let addr = Keystore::derive_address(pk_hex, &cfg.oz_class_hash)?;
@@ -144,41 +154,41 @@ fn get_account_info(index: &usize, keys: &[String], cfg: &Config) -> Result<(Str
     Ok((addr, priv_felt, pub_felt))
 }
 
-fn validate_target_address(addr: &str) -> Result<()> {
+fn validate_target_address(addr: &str, msgs: &i18n::Messages) -> Result<()> {
     if !addr.starts_with("0x") {
-        return Err(anyhow::anyhow!("❌ 地址必须以 0x 开头"));
+        return Err(anyhow::anyhow!("{}", msgs.address_must_start_with_0x));
     }
     if addr.len() < 50 {
-        return Err(anyhow::anyhow!("❌ 地址长度过短，请检查是否完整"));
+        return Err(anyhow::anyhow!("{}", msgs.address_too_short));
     }
-    Felt::from_hex(addr).map_err(|_| anyhow::anyhow!("❌ 地址格式无效 (非 Hex)"))?;
+    Felt::from_hex(addr).map_err(|_| anyhow::anyhow!("{}", msgs.address_invalid_hex))?;
     Ok(())
 }
 
 // ==================== 交互模式逻辑 ====================
 
 async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
-    println!("🚀 StarkArk CLI Wallet (Interactive)");
+    println!("{}", cfg.messages.interactive_welcome);
     println!("===================================");
     
     // 修复点：正确解包 3 个返回值
-    let (current_keystore, private_keys, password) = load_and_decrypt(&cfg.keystore_file)?;
-    println!("✅ 解密成功！当前管理 {} 个账户。", private_keys.len());
+    let (current_keystore, private_keys, password) = load_and_decrypt(&cfg.keystore_file, &cfg.messages)?;
+    println!("{}", cfg.messages.decrypt_success_fmt.replace("{count}", &private_keys.len().to_string()));
 
     let mut keys = private_keys;
     let mut keystore_obj = current_keystore;
     let pass = password; 
 
     loop {
-        println!("\n📋 账户列表:");
+        println!("\n{}", cfg.messages.account_list);
         for (i, pk) in keys.iter().enumerate() {
             let addr = Keystore::derive_address(pk, &cfg.oz_class_hash)?;
             println!("   [{}] {}", i, &addr[0..10]);
         }
-        println!("   [N] ✨ 创建新账户");
-        println!("   [Q] 🚪 退出");
+        println!("   {}", cfg.messages.menu_create_account);
+        println!("   {}", cfg.messages.menu_quit);
         
-        print!("\n👉 选择: ");
+        print!("\n{}", cfg.messages.menu_choice);
         io::stdout().flush()?;
         let mut choice = String::new();
         io::stdin().read_line(&mut choice)?;
@@ -187,13 +197,13 @@ async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
         if choice == "Q" {
             break;
         } else if choice == "N" {
-            println!("⚙️  生成新账户...");
+            println!("{}", cfg.messages.generating_new_account);
             let updated = Keystore::add_new_account(&keystore_obj, &pass)?;
             save_keystore(&cfg.keystore_file, &updated)?;
             // 更新内存状态
             keystore_obj = updated;
             keys = keystore_obj.decrypt(&pass)?; 
-            println!("🎉 成功！");
+            println!("{}", cfg.messages.new_account_created);
         } else if let Ok(index) = choice.parse::<usize>() {
             if index < keys.len() {
                 // 进入单账户操作
@@ -214,23 +224,23 @@ async fn process_single_account_interactive(
     cfg: &Config
 ) -> Result<()> {
     let addr = Keystore::derive_address(priv_key, &cfg.oz_class_hash)?;
-    println!("\n--- 账户 [{}] ---", idx);
-    println!("📍 地址: {}", addr);
+    println!("\n{}", cfg.messages.account_details_title.replace("{index}", &idx.to_string()));
+    println!("{}{}", cfg.messages.address_label, addr);
     
     let balance = network::get_balance(&cfg.rpc_url, &cfg.strk_contract_address, &addr).await?;
-    println!("💰 余额: {:.4}", balance);
+    println!("{}{:.4}", cfg.messages.balance_label, balance);
     
     let deployed = network::is_account_deployed(&cfg.rpc_url, &addr).await?;
     
-    println!("操作: [T]转账 [A]激活 [B]返回");
-    print!("👉 ");
+    println!("{}", cfg.messages.operations_label);
+    print!("{}", cfg.messages.menu_choice);
     io::stdout().flush()?;
     let mut c = String::new();
     io::stdin().read_line(&mut c)?;
     match c.trim().to_uppercase().as_str() {
         "T" => {
-            if !deployed { println!("未激活！"); return Ok(()); }
-            print!("接收地址 (输入 Hex 地址或本地账户序号): ");
+            if !deployed { println!("{}", cfg.messages.not_activated); return Ok(()); }
+            print!("{}", cfg.messages.input_receiver);
             io::stdout().flush()?;
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
@@ -240,40 +250,42 @@ async fn process_single_account_interactive(
                 if target_idx < all_keys.len() {
                     let target_pk = &all_keys[target_idx];
                     let addr = Keystore::derive_address(target_pk, &cfg.oz_class_hash)?;
-                    println!("   -> 选中本地账户 [{}]: {}", target_idx, addr);
+                    println!("{}", cfg.messages.selected_local_account
+                        .replace("{index}", &target_idx.to_string())
+                        .replace("{addr}", &addr));
                     addr
                 } else {
-                    println!("❌ 索引越界！最大索引是 {}", all_keys.len() - 1);
+                    println!("{}", cfg.messages.index_out_of_bounds);
                     return Ok(());
                 }
             } else {
-                if let Err(e) = validate_target_address(input) {
+                if let Err(e) = validate_target_address(input, &cfg.messages) {
                     println!("{}", e);
                     return Ok(());
                 }
                 input.to_string()
             };
             
-            print!("金额: ");
+            print!("{}", cfg.messages.input_amount);
             io::stdout().flush()?;
             let mut amt_s = String::new();
             io::stdin().read_line(&mut amt_s)?;
             let amt: f64 = match amt_s.trim().parse() {
                 Ok(f) => f,
-                Err(_) => { println!("金额无效"); return Ok(()); }
+                Err(_) => { println!("{}", cfg.messages.amount_invalid); return Ok(()); }
             };
             
             let pk_felt = Felt::from_hex(priv_key)?;
-            let tx = network::transfer_strk(&cfg.rpc_url, &cfg.strk_contract_address, &addr, pk_felt, &to_addr, amt).await?;
-            println!("✅ Hash: {}", tx);
+            let tx = network::transfer_strk(&cfg.rpc_url, &cfg.strk_contract_address, &addr, pk_felt, &to_addr, amt, (&cfg.messages.network_building_tx, &cfg.messages.network_target_label, &cfg.messages.network_amount_label)).await?;
+            println!("{}{}", cfg.messages.tx_sent, tx);
         },
         "A" => {
-            if deployed { println!("已激活"); return Ok(()); }
+            if deployed { println!("{}", cfg.messages.already_activated); return Ok(()); }
             let pk_felt = Felt::from_hex(priv_key)?;
             let signer = SigningKey::from_secret_scalar(pk_felt);
             let pub_felt = signer.verifying_key().scalar();
-            let tx = network::deploy_account(&cfg.rpc_url, &cfg.oz_class_hash, pk_felt, pub_felt).await?;
-            println!("✅ Hash: {}", tx);
+            let tx = network::deploy_account(&cfg.rpc_url, &cfg.oz_class_hash, pk_felt, pub_felt, &cfg.messages.network_deploying).await?;
+            println!("{}{}", cfg.messages.tx_sent, tx);
         },
         _ => {}
     }
@@ -283,8 +295,8 @@ async fn process_single_account_interactive(
 // ==================== 通用辅助函数 ====================
 
 /// 加载并解密，返回 (Keystore对象, 私钥列表, 密码字符串)
-fn load_and_decrypt(filepath: &str) -> Result<(Keystore, Vec<String>, String)> {
-    print!("🔑 请输入密码解锁: ");
+fn load_and_decrypt(filepath: &str, msgs: &i18n::Messages) -> Result<(Keystore, Vec<String>, String)> {
+    print!("{}", msgs.enter_password);
     io::stdout().flush()?;
     let password = prompt_password()?;
 
@@ -292,7 +304,7 @@ fn load_and_decrypt(filepath: &str) -> Result<(Keystore, Vec<String>, String)> {
     let keystore: Keystore = serde_json::from_str(&content)?;
     
     let keys = keystore.decrypt(&password)
-        .map_err(|_| anyhow::anyhow!("❌ 密码错误！"))?;
+        .map_err(|_| anyhow::anyhow!("{}", msgs.password_error))?;
     
     Ok((keystore, keys, password))
 }
@@ -307,16 +319,16 @@ fn save_keystore(filepath: &str, keystore: &Keystore) -> Result<()> {
     Ok(())
 }
 
-fn initialize_new_wallet(filename: &str) -> Result<()> {
+fn initialize_new_wallet(filename: &str, msgs: &i18n::Messages) -> Result<()> {
     let priv_key = Keystore::generate_new_key();
-    println!("🛡️ 初始化新钱包...");
-    print!("请设置密码: ");
+    println!("{}", msgs.init_new_wallet);
+    print!("{}", msgs.set_password);
     io::stdout().flush()?;
     let password = prompt_password()?;
     
     let keys = vec![priv_key];
     let keystore = Keystore::encrypt(&password, &keys)?;
     save_keystore(filename, &keystore)?;
-    println!("🎉 钱包初始化完成！");
+    println!("{}", msgs.wallet_init_complete);
     Ok(())
 }
