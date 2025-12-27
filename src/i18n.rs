@@ -40,6 +40,8 @@ pub struct Messages {
     pub network_building_tx: String,
     pub network_target_label: String,
     pub network_amount_label: String,
+    pub export_warning: String,
+    pub export_result_fmt: String, // 使用 {index} 和 {key}
 }
 
 impl Default for Messages {
@@ -84,6 +86,8 @@ impl Default for Messages {
             network_building_tx: "⚙️  Building transfer tx...".to_string(),
             network_target_label: "   Target: ".to_string(),
             network_amount_label: "   Amount: ".to_string(),
+            export_warning: "⚠️  WARNING: You are exporting a private key! Do not share this with anyone.".to_string(),
+            export_result_fmt: "🔑 Private Key [{index}]: {key}".to_string(),
         }
     }
 }
@@ -129,6 +133,8 @@ impl Messages {
             network_building_tx: "⚙️  正在构建转账交易...".to_string(),
             network_target_label: "   目标: ".to_string(),
             network_amount_label: "   金额: ".to_string(),
+            export_warning: "⚠️  警告：你正在导出私钥！请勿将私钥透露给任何人。".to_string(),
+            export_result_fmt: "🔑 账户 [{index}] 私钥: {key}".to_string(),
         }
     }
 }

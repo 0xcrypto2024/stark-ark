@@ -54,6 +54,11 @@ enum Commands {
         #[arg(short, long)]
         amount: f64,
     },
+    /// 🔑 Export private key (Unsafe!)
+    Export {
+        #[arg(short, long)]
+        index: usize,
+    },
 }
 
 // ==================== 主入口 ====================
@@ -136,6 +141,17 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
                 (&cfg.messages.network_building_tx, &cfg.messages.network_target_label, &cfg.messages.network_amount_label)
             ).await?;
             println!("{}{}", cfg.messages.transfer_success, tx);
+        },
+        Commands::Export { index } => {
+            if *index >= private_keys.len() {
+                println!("{}", cfg.messages.index_out_of_bounds);
+                return Ok(());
+            }
+            println!("{}", cfg.messages.export_warning);
+            let pk = &private_keys[*index];
+            println!("{}", cfg.messages.export_result_fmt
+                .replace("{index}", &index.to_string())
+                .replace("{key}", pk));
         }
     }
     Ok(())
@@ -232,7 +248,8 @@ async fn process_single_account_interactive(
     
     let deployed = network::is_account_deployed(&cfg.rpc_url, &addr).await?;
     
-    println!("{}", cfg.messages.operations_label);
+    // 动态修改操作提示，增加 [E]Export
+    println!("{} [E]Export", cfg.messages.operations_label.replace(" [B]Back", ""));
     print!("{}", cfg.messages.menu_choice);
     io::stdout().flush()?;
     let mut c = String::new();
@@ -286,6 +303,12 @@ async fn process_single_account_interactive(
             let pub_felt = signer.verifying_key().scalar();
             let tx = network::deploy_account(&cfg.rpc_url, &cfg.oz_class_hash, pk_felt, pub_felt, &cfg.messages.network_deploying).await?;
             println!("{}{}", cfg.messages.tx_sent, tx);
+        },
+        "E" => {
+            println!("{}", cfg.messages.export_warning);
+            println!("{}", cfg.messages.export_result_fmt
+                .replace("{index}", &idx.to_string())
+                .replace("{key}", priv_key));
         },
         _ => {}
     }
