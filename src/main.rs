@@ -17,6 +17,10 @@ use starknet::signers::SigningKey;
 #[command(name = "stark-ark")]
 #[command(about = "Starknet CLI Wallet in Rust", long_about = None)]
 struct Cli {
+    /// 指定 keystore 文件路径
+    #[arg(short, long, global = true)]
+    keystore: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -55,8 +59,12 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cfg = Config::load()?;
+    let mut cfg = Config::load()?;
     let cli = Cli::parse();
+
+    if let Some(path) = cli.keystore {
+        cfg.keystore_file = path;
+    }
 
     // 如果没有 keystore，先初始化
     if !Path::new(&cfg.keystore_file).exists() {
@@ -106,6 +114,7 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
             println!("✅ 交易已发送: {}", tx);
         },
         Commands::Transfer { from_index, to, amount } => {
+            validate_target_address(to)?;
             let (addr, priv_felt, _) = get_account_info(from_index, &private_keys, cfg)?;
             println!("💸 正在从 [{}] 发送 {} STRK 到 {}", from_index, amount, to);
             let tx = network::transfer_strk(
@@ -133,6 +142,17 @@ fn get_account_info(index: &usize, keys: &[String], cfg: &Config) -> Result<(Str
     let signer = SigningKey::from_secret_scalar(priv_felt);
     let pub_felt = signer.verifying_key().scalar();
     Ok((addr, priv_felt, pub_felt))
+}
+
+fn validate_target_address(addr: &str) -> Result<()> {
+    if !addr.starts_with("0x") {
+        return Err(anyhow::anyhow!("❌ 地址必须以 0x 开头"));
+    }
+    if addr.len() < 50 {
+        return Err(anyhow::anyhow!("❌ 地址长度过短，请检查是否完整"));
+    }
+    Felt::from_hex(addr).map_err(|_| anyhow::anyhow!("❌ 地址格式无效 (非 Hex)"))?;
+    Ok(())
 }
 
 // ==================== 交互模式逻辑 ====================
@@ -177,7 +197,7 @@ async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
         } else if let Ok(index) = choice.parse::<usize>() {
             if index < keys.len() {
                 // 进入单账户操作
-                if let Err(e) = process_single_account_interactive(&keys[index], index, cfg).await {
+                if let Err(e) = process_single_account_interactive(&keys[index], index, &keys, cfg).await {
                     println!("❌ 错误: {}", e);
                 }
             }
@@ -190,7 +210,7 @@ async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
 async fn process_single_account_interactive(
     priv_key: &str, 
     idx: usize, 
-    // 修复点：删除了未使用的 all_keys 参数
+    all_keys: &[String],
     cfg: &Config
 ) -> Result<()> {
     let addr = Keystore::derive_address(priv_key, &cfg.oz_class_hash)?;
@@ -210,10 +230,29 @@ async fn process_single_account_interactive(
     match c.trim().to_uppercase().as_str() {
         "T" => {
             if !deployed { println!("未激活！"); return Ok(()); }
-            print!("接收地址: ");
+            print!("接收地址 (输入 Hex 地址或本地账户序号): ");
             io::stdout().flush()?;
-            let mut to = String::new();
-            io::stdin().read_line(&mut to)?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let input = input.trim();
+
+            let to_addr = if let Ok(target_idx) = input.parse::<usize>() {
+                if target_idx < all_keys.len() {
+                    let target_pk = &all_keys[target_idx];
+                    let addr = Keystore::derive_address(target_pk, &cfg.oz_class_hash)?;
+                    println!("   -> 选中本地账户 [{}]: {}", target_idx, addr);
+                    addr
+                } else {
+                    println!("❌ 索引越界！最大索引是 {}", all_keys.len() - 1);
+                    return Ok(());
+                }
+            } else {
+                if let Err(e) = validate_target_address(input) {
+                    println!("{}", e);
+                    return Ok(());
+                }
+                input.to_string()
+            };
             
             print!("金额: ");
             io::stdout().flush()?;
@@ -225,7 +264,7 @@ async fn process_single_account_interactive(
             };
             
             let pk_felt = Felt::from_hex(priv_key)?;
-            let tx = network::transfer_strk(&cfg.rpc_url, &cfg.strk_contract_address, &addr, pk_felt, to.trim(), amt).await?;
+            let tx = network::transfer_strk(&cfg.rpc_url, &cfg.strk_contract_address, &addr, pk_felt, &to_addr, amt).await?;
             println!("✅ Hash: {}", tx);
         },
         "A" => {
@@ -259,9 +298,7 @@ fn load_and_decrypt(filepath: &str) -> Result<(Keystore, Vec<String>, String)> {
 }
 
 fn prompt_password() -> Result<String> {
-    let mut password = String::new();
-    io::stdin().read_line(&mut password)?;
-    Ok(password.trim().to_string())
+    Ok(rpassword::read_password()?.trim().to_string())
 }
 
 fn save_keystore(filepath: &str, keystore: &Keystore) -> Result<()> {
