@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
-use aes_gcm::{Aes256Gcm, Key, KeyInit, aead::Aead, Nonce};
+use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead, Nonce};
 use argon2::{Argon2, password_hash::{SaltString, PasswordHasher, rand_core::OsRng}};
 use starknet::core::types::Felt;
 use starknet::core::utils::get_contract_address;
@@ -38,18 +38,17 @@ impl Keystore {
             .map_err(|e| anyhow::anyhow!("Hash error: {}", e))?;
         
         let output = password_hash.hash.ok_or_else(|| anyhow::anyhow!("Hash output error"))?;
-        let key = Key::<Aes256Gcm>::from_slice(&output.as_bytes()[..32]);
-        let cipher = Aes256Gcm::new(key);
+        let cipher = Aes256Gcm::new_from_slice(&output.as_bytes()[..32]).map_err(|_| anyhow::anyhow!("Invalid key length"))?;
 
         let mut nonce_bytes = [0u8; 12];
         rng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
         
         // 将列表转为 JSON 字符串后加密
         let payload = serde_json::to_string(accounts)?;
         
         let ciphertext = cipher
-            .encrypt(nonce, payload.as_bytes())
+            .encrypt(&nonce, payload.as_bytes())
             .map_err(|e| anyhow::anyhow!("Encryption error: {}", e))?;
 
         Ok(Self {
@@ -72,15 +71,15 @@ impl Keystore {
             .map_err(|e| anyhow::anyhow!("Hash error: {}", e))?;
 
         let output = password_hash.hash.ok_or_else(|| anyhow::anyhow!("Hash output error"))?;
-        let key = Key::<Aes256Gcm>::from_slice(&output.as_bytes()[..32]);
-        let cipher = Aes256Gcm::new(key);
+        let cipher = Aes256Gcm::new_from_slice(&output.as_bytes()[..32]).map_err(|_| anyhow::anyhow!("Invalid key length"))?;
 
-        let nonce_bytes = hex::decode(&self.nonce)?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce_vec = hex::decode(&self.nonce)?;
+        let nonce_bytes: [u8; 12] = nonce_vec.try_into().map_err(|_| anyhow::anyhow!("Invalid nonce length"))?;
+        let nonce = Nonce::from(nonce_bytes);
         let ciphertext_bytes = hex::decode(&self.ciphertext)?;
 
         let decrypted_bytes = cipher
-            .decrypt(nonce, ciphertext_bytes.as_ref())
+            .decrypt(&nonce, ciphertext_bytes.as_ref())
             .map_err(|_| anyhow::anyhow!("❌ 密码错误或文件损坏"))?;
 
         let decrypted_str = String::from_utf8(decrypted_bytes)?;

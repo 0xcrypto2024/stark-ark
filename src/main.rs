@@ -69,6 +69,8 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigSubcommands,
     },
+    /// ℹ️ Show version information
+    Version,
 }
 
 #[derive(Subcommand)]
@@ -84,6 +86,12 @@ enum ConfigSubcommands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Handle Version command
+    if let Some(Commands::Version) = &cli.command {
+        println!("StarkArk v{}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     // 优先处理 Config 命令 (不需要加载 Config)
     if let Some(Commands::Config { command }) = &cli.command {
@@ -263,7 +271,7 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
                 Err(_) => println!("{}", cfg.messages.import_exists),
             }
         },
-        Commands::Config { .. } => {}
+        Commands::Config { .. } | Commands::Version => {}
     }
     Ok(())
 }
