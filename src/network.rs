@@ -5,7 +5,6 @@ use starknet::{
         // ✅ Call 移到了这里 (core::types)
         types::{BlockId, BlockTag, Felt, FunctionCall, Call}, 
         utils::get_selector_from_name,
-        chain_id,
     },
     providers::{jsonrpc::HttpTransport, JsonRpcClient, Provider},
     signers::{LocalWallet, SigningKey},
@@ -64,13 +63,16 @@ pub async fn deploy_account(
 ) -> Result<String> {
     let url = Url::parse(rpc_url)?;
     let provider = JsonRpcClient::new(HttpTransport::new(url));
+    
+    // ✅ 自动获取当前网络的 Chain ID，防止配置错误导致签名无效
+    let chain_id = provider.chain_id().await?;
 
     let signer = LocalWallet::from(SigningKey::from_secret_scalar(private_key));
     let class_hash = Felt::from_hex(class_hash_hex)?;
     
     let factory = OpenZeppelinAccountFactory::new(
         class_hash,
-        chain_id::SEPOLIA,
+        chain_id,
         signer,
         provider,
     ).await?;
@@ -94,6 +96,8 @@ pub async fn transfer_strk(
 ) -> Result<String> {
     let url = Url::parse(rpc_url)?;
     let provider = JsonRpcClient::new(HttpTransport::new(url));
+    // ✅ 自动获取 Chain ID
+    let chain_id = provider.chain_id().await?;
     let signer = LocalWallet::from(SigningKey::from_secret_scalar(private_key));
     let sender_felt = Felt::from_hex(sender_address)?;
 
@@ -102,7 +106,7 @@ pub async fn transfer_strk(
     provider,
     signer,
     sender_felt,
-    chain_id::SEPOLIA,
+    chain_id,
     ExecutionEncoding::New,
     );
 

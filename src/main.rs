@@ -8,6 +8,8 @@ use std::path::Path;
 use std::io::{self, Write};
 use starknet::core::types::Felt;
 use starknet::signers::SigningKey;
+use qrcode::QrCode;
+use qrcode::render::unicode;
 
 // ==================== CLI 定义 ====================
 
@@ -399,6 +401,14 @@ async fn process_single_account_interactive(
     let addr = Keystore::compute_address(account, &cfg.oz_class_hash)?;
     println!("\n{}", cfg.messages.account_details_title.replace("{index}", &idx.to_string()));
     println!("{}{}", cfg.messages.address_label, addr);
+
+    // 显示 QR Code
+    if let Ok(code) = QrCode::new(addr.as_bytes()) {
+        let image = code.render::<unicode::Dense1x2>()
+            .quiet_zone(true)
+            .build();
+        println!("\n{}", image);
+    }
     
     let balance = network::get_balance(&cfg.rpc_url, &cfg.strk_contract_address, &addr).await?;
     println!("{}{:.4}", cfg.messages.balance_label, balance);

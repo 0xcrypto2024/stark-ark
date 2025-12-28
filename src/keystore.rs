@@ -154,7 +154,8 @@ impl Keystore {
             deployer,
         );
 
-        Ok(format!("{:#x}", address))
+        let bytes = address.to_bytes_be();
+        Ok(format!("0x{}", hex::encode(bytes)))
     }
 }
 
