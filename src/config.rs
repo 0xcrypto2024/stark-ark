@@ -43,18 +43,20 @@ impl Config {
             Self::load_messages(&lang).unwrap_or_else(|_| Messages::default())
         };
 
+        let missing_msg = &messages.env_var_missing;
+
         Ok(Self {
             rpc_url: env::var("STARKNET_RPC_URL")
-                .context("❌ 未在 .env 中找到 STARKNET_RPC_URL")?,
+                .context(missing_msg.replace("{var}", "STARKNET_RPC_URL"))?,
             
             keystore_file: env::var("KEYSTORE_FILE")
                 .unwrap_or_else(|_| "keystore.json".to_string()),
             
             strk_contract_address: env::var("STRK_CONTRACT_ADDRESS")
-                .context("❌ 未在 .env 中找到 STRK_CONTRACT_ADDRESS")?,
+                .context(missing_msg.replace("{var}", "STRK_CONTRACT_ADDRESS"))?,
             
             oz_class_hash: env::var("OZ_CLASS_HASH")
-                .context("❌ 未在 .env 中找到 OZ_CLASS_HASH")?,
+                .context(missing_msg.replace("{var}", "OZ_CLASS_HASH"))?,
             
             messages,
         })

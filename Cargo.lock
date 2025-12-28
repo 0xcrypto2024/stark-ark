@@ -1952,7 +1952,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stark-ark"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1960,6 +1960,7 @@ dependencies = [
  "clap",
  "directories",
  "dotenv",
+ "generic-array",
  "hex",
  "rand 0.8.5",
  "rpassword",

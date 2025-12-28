@@ -308,7 +308,8 @@ async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
         println!("\n{}", cfg.messages.account_list);
         for (i, acc) in current_accounts.iter().enumerate() {
             let addr = Keystore::compute_address(acc, &cfg.oz_class_hash)?;
-            println!("   [{}] {}", i, &addr[0..10]);
+            let alias_suffix = acc.alias.as_ref().map(|a| format!(" ({})", a)).unwrap_or_default();
+            println!("   [{}] {}{}", i, addr, alias_suffix);
         }
         println!("   {}", cfg.messages.menu_create_account);
         println!("   {}", cfg.messages.menu_import_account);
@@ -380,7 +381,7 @@ async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
             if index < current_accounts.len() {
                 // 进入单账户操作
                 if let Err(e) = process_single_account_interactive(&current_accounts[index], index, &current_accounts, cfg).await {
-                    println!("❌ 错误: {}", e);
+                    println!("{}{}", cfg.messages.error_prefix, e);
                 }
             }
         }

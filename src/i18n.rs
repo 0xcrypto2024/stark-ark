@@ -48,6 +48,8 @@ pub struct Messages {
     pub import_exists: String,
     pub menu_import_account: String,
     pub import_derivation_warning: String,
+    pub error_prefix: String,
+    pub env_var_missing: String,
 }
 
 impl Default for Messages {
@@ -100,6 +102,8 @@ impl Default for Messages {
             import_exists: "❌ Account already exists!".to_string(),
             menu_import_account: "[I] 📥 Import Account".to_string(),
             import_derivation_warning: "⚠️  Note: Address is derived using default parameters (Salt=PubKey). Accounts created with different salts/class hashes won't appear.".to_string(),
+            error_prefix: "❌ Error: ".to_string(),
+            env_var_missing: "❌ Missing environment variable in .env: {var}".to_string(),
         }
     }
 }
@@ -153,6 +157,8 @@ impl Messages {
             import_exists: "❌ 账户已存在！".to_string(),
             menu_import_account: "[I] 📥 导入账户".to_string(),
             import_derivation_warning: "⚠️  注意：地址是基于默认参数（Salt=公钥）计算的。如果您的账户使用了不同的 Salt 或 Class Hash，将无法在此显示。".to_string(),
+            error_prefix: "❌ 错误: ".to_string(),
+            env_var_missing: "❌ 未在 .env 中找到 {var}".to_string(),
         }
     }
 }
