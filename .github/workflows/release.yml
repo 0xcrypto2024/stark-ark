@@ -55,6 +55,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
