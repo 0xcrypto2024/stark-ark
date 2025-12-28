@@ -1,6 +1,6 @@
 # Stark Ark
 
-`stark-ark` 是一个基于 Rust 开发的 Starknet 工具应用，集成了加密安全与命令行交互功能。
+`stark-ark` 是一个基于 Rust 开发的 Starknet 工具应用，集成了加密安全与命令行交互功能。使用keychain设计保证每一个账户的私钥的独立性，确保私钥安全。
 
 ## 功能特性
 
