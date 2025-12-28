@@ -62,14 +62,69 @@ enum Commands {
         #[arg(short, long)]
         key: Option<String>,
     },
+    /// ⚙️ Configuration management
+    Config {
+        #[command(subcommand)]
+        command: ConfigSubcommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigSubcommands {
+    /// 📝 Initialize default .env configuration
+    Init,
+    /// 🔍 Show current configuration
+    Show,
 }
 
 // ==================== 主入口 ====================
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut cfg = Config::load()?;
     let cli = Cli::parse();
+
+    // 优先处理 Config 命令 (不需要加载 Config)
+    if let Some(Commands::Config { command }) = &cli.command {
+        match command {
+            ConfigSubcommands::Init => {
+                let path = Config::get_default_config_path()?;
+                if path.exists() {
+                    print!("⚠️  Configuration file already exists at {:?}.\nOverwrite? [y/N]: ", path);
+                    io::stdout().flush()?;
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    if input.trim().to_lowercase() != "y" {
+                        println!("🚫 Aborted.");
+                        return Ok(());
+                    }
+                }
+                Config::write_default_config(&path)?;
+                println!("✅ Configuration initialized at: {:?}", path);
+                return Ok(());
+            },
+            ConfigSubcommands::Show => {
+                if let Some(path) = Config::find_active_config_path() {
+                    println!("📂 Active Configuration File: {:?}", path);
+                    match Config::load() {
+                        Ok(cfg) => {
+                            println!("--------------------------------");
+                            println!("RPC URL:      {}", cfg.rpc_url);
+                            println!("Keystore:     {}", cfg.keystore_file);
+                            println!("STRK Contract:{}", cfg.strk_contract_address);
+                            println!("Class Hash:   {}", cfg.oz_class_hash);
+                            println!("--------------------------------");
+                        }
+                        Err(e) => println!("❌ Failed to load configuration: {}", e),
+                    }
+                } else {
+                    println!("❌ No active .env configuration found.\n   Searched in: Current Dir, Executable Dir, User Config Dir");
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    let mut cfg = Config::load()?;
 
     if let Some(path) = cli.keystore {
         cfg.keystore_file = path;
@@ -205,7 +260,8 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
                 },
                 Err(_) => println!("{}", cfg.messages.import_exists),
             }
-        }
+        },
+        Commands::Config { .. } => {}
     }
     Ok(())
 }

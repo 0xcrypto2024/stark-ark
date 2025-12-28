@@ -1,6 +1,6 @@
 [package]
 name = "stark-ark"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2021"
 description = "A secure, Rust-based CLI wallet and library for Starknet."
 license = "MIT"
@@ -33,3 +33,4 @@ url = "2.5"
 # ✅ 新增：命令行参数解析
 clap = { version = "4.4", features = ["derive"] }
 rpassword = "7.0"
+directories = "6.0.0"
