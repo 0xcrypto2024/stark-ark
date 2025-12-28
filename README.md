@@ -1,49 +1,121 @@
-# Stark Ark
+# StarkArk
 
-`stark-ark` 是一个基于 Rust 开发的 Starknet 工具应用，集成了加密安全与命令行交互功能。使用keychain设计保证每一个账户的私钥的独立性，确保私钥安全。
+A secure, Rust-based CLI wallet and library for Starknet.
 
-## 功能特性
+## Features
 
-- **Starknet 集成**: 使用 `starknet` crate 与 Starknet 网络进行交互。
-- **安全加密**: 采用 `aes-gcm` (AES-GCM) 和 `argon2` (Argon2) 算法处理敏感数据加密与密码哈希。
-- **命令行接口**: 通过 `clap` 提供直观的命令行参数解析与操作界面。
-- **异步架构**: 基于 `tokio` 实现高性能的异步 I/O 操作。
-- **配置管理**: 支持 `dotenv`，方便从 `.env` 文件加载环境变量配置。
-- **数据处理**: 使用 `serde` 和 `serde_json` 进行高效的数据序列化与反序列化。
+- 🛡️ **Secure Keystore**: Encrypted local storage for private keys using AES-256-GCM and Argon2.
+- ⚡ **Starknet Integration**: Native support for Starknet accounts (OpenZeppelin), transfers, and deployments.
+- 🖥️ **Interactive & CLI Modes**: Use it as a command-line tool or via an interactive menu.
+- 🌍 **Multi-language Support**: Supports English and Chinese (configurable via `.env`).
+- 📦 **Library Support**: Can be used as a Rust crate in other projects.
 
-## 依赖概览
+## Installation
 
-本项目使用了以下核心库：
+### From Source
 
-- `starknet`: 区块链交互核心库
-- `clap`: CLI 构建工具
-- `tokio`: 异步运行时
-- `aes-gcm` / `argon2` / `hex`: 安全、加密与编码
-- `anyhow`: 错误处理
-- `uuid`: 唯一标识符生成
-
-## 快速开始
-
-### 前置要求
-
-- Rust (Edition 2021)
-
-### 安装与构建
+Ensure you have Rust installed.
 
 ```bash
-# 编译项目
-cargo build --release
+git clone https://github.com/your-username/stark-ark.git
+cd stark-ark
+cargo install --path .
 ```
 
-### 运行
+## Configuration
 
-由于项目使用了 `clap`，你可以通过以下命令查看可用的命令行参数：
+Before using StarkArk, you need to configure the RPC endpoint and other settings.
+
+1.  **Initialize Configuration**:
+    Run the following command to generate a default configuration file in your system's config directory:
+
+    ```bash
+    stark-ark config init
+    ```
+
+2.  **Edit Configuration**:
+    The command above will tell you where the file was created (e.g., `~/.config/stark-ark/.env` on Linux). Open it and set your `STARKNET_RPC_URL`.
+
+    ```dotenv
+    STARKNET_RPC_URL=https://starknet-sepolia.public.blastapi.io
+    ```
+
+3.  **Check Configuration**:
+    Verify your settings:
+
+    ```bash
+    stark-ark config show
+    ```
+
+## Usage
+
+StarkArk can be used in **Interactive Mode** (by running without arguments) or **CLI Mode**.
+
+### Interactive Mode
+
+Simply run:
 
 ```bash
-# 查看帮助信息
-cargo run -- --help
+stark-ark
 ```
 
-## 配置
+Follow the on-screen prompts to create a wallet, manage accounts, and send transactions.
 
-请确保在项目根目录下配置 `.env` 文件以设置必要的环境变量（如 RPC URL 或私钥等）。
+### CLI Commands
+
+#### 1. Create a New Account
+Generate a new private key and add it to your keystore.
+
+```bash
+stark-ark new
+```
+
+#### 2. List Accounts
+View all accounts managed by the keystore.
+
+```bash
+stark-ark list
+```
+
+#### 3. Import an Account
+Import an existing private key or a JSON account config (which allows custom salts/class hashes).
+
+```bash
+# Interactive import (recommended)
+stark-ark import
+
+# Or via command line (unsafe for history)
+stark-ark import --key <PRIVATE_KEY_HEX_OR_JSON>
+```
+
+#### 4. Check Balance
+Check the STRK balance of a specific account (by index).
+
+```bash
+stark-ark balance --index 0
+```
+
+#### 5. Deploy/Activate Account
+Deploy the account contract to the Starknet network. This is required before you can execute transactions (other than `deploy`). You need to fund the address with ETH/STRK first.
+
+```bash
+stark-ark deploy --index 0
+```
+
+#### 6. Transfer Funds
+Send STRK to another address.
+
+```bash
+stark-ark transfer --from-index 0 --to 0x123... --amount 1.5
+```
+
+#### 7. Export Private Key
+Export the private key or full account configuration (JSON) for backup.
+
+```bash
+stark-ark export --index 0
+```
+
+## License
+
+MIT
