@@ -41,7 +41,13 @@ pub struct Messages {
     pub network_target_label: String,
     pub network_amount_label: String,
     pub export_warning: String,
-    pub export_result_fmt: String, // 使用 {index} 和 {key}
+    pub export_result_fmt: String, // 使用 {json}
+    pub import_enter_key: String,
+    pub import_success: String,
+    pub import_invalid_key: String,
+    pub import_exists: String,
+    pub menu_import_account: String,
+    pub import_derivation_warning: String,
 }
 
 impl Default for Messages {
@@ -87,7 +93,13 @@ impl Default for Messages {
             network_target_label: "   Target: ".to_string(),
             network_amount_label: "   Amount: ".to_string(),
             export_warning: "⚠️  WARNING: You are exporting a private key! Do not share this with anyone.".to_string(),
-            export_result_fmt: "🔑 Private Key [{index}]: {key}".to_string(),
+            export_result_fmt: "🔑 Account Config:\n{json}".to_string(),
+            import_enter_key: "📥 Enter Private Key (Hex): ".to_string(),
+            import_success: "✅ Account imported successfully!".to_string(),
+            import_invalid_key: "❌ Invalid private key format!".to_string(),
+            import_exists: "❌ Account already exists!".to_string(),
+            menu_import_account: "[I] 📥 Import Account".to_string(),
+            import_derivation_warning: "⚠️  Note: Address is derived using default parameters (Salt=PubKey). Accounts created with different salts/class hashes won't appear.".to_string(),
         }
     }
 }
@@ -134,7 +146,32 @@ impl Messages {
             network_target_label: "   目标: ".to_string(),
             network_amount_label: "   金额: ".to_string(),
             export_warning: "⚠️  警告：你正在导出私钥！请勿将私钥透露给任何人。".to_string(),
-            export_result_fmt: "🔑 账户 [{index}] 私钥: {key}".to_string(),
+            export_result_fmt: "🔑 账户配置信息:\n{json}".to_string(),
+            import_enter_key: "📥 请输入私钥 (Hex): ".to_string(),
+            import_success: "✅ 账户导入成功！".to_string(),
+            import_invalid_key: "❌ 私钥格式无效！".to_string(),
+            import_exists: "❌ 账户已存在！".to_string(),
+            menu_import_account: "[I] 📥 导入账户".to_string(),
+            import_derivation_warning: "⚠️  注意：地址是基于默认参数（Salt=公钥）计算的。如果您的账户使用了不同的 Salt 或 Class Hash，将无法在此显示。".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_en() {
+        let msgs = Messages::default();
+        assert!(msgs.wallet_not_found.contains("Wallet file not found"));
+        assert!(msgs.menu_quit.contains("Quit"));
+    }
+
+    #[test]
+    fn test_default_zh() {
+        let msgs = Messages::default_zh();
+        assert!(msgs.wallet_not_found.contains("未找到钱包文件"));
+        assert!(msgs.menu_quit.contains("退出"));
     }
 }

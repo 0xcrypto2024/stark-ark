@@ -4,7 +4,7 @@ mod config;
 mod i18n;
 
 use clap::{Parser, Subcommand};
-use keystore::Keystore;
+use keystore::{Keystore, AccountConfig};
 use config::Config;
 use anyhow::Result;
 use std::path::Path;
@@ -59,6 +59,12 @@ enum Commands {
         #[arg(short, long)]
         index: usize,
     },
+    /// 📥 Import account
+    Import {
+        /// Private Key (Hex) or JSON Config
+        #[arg(short, long)]
+        key: Option<String>,
+    },
 }
 
 // ==================== 主入口 ====================
@@ -91,25 +97,34 @@ async fn main() -> Result<()> {
 
 async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
     // 修复点：这里接收 3 个返回值，忽略密码 (_)
-    let (keystore, private_keys, password) = load_and_decrypt(&cfg.keystore_file, &cfg.messages)?;
+    let (keystore, accounts, password) = load_and_decrypt(&cfg.keystore_file, &cfg.messages)?;
 
     match cmd {
         Commands::List => {
             println!("{}", cfg.messages.account_list);
-            for (i, pk) in private_keys.iter().enumerate() {
-                let addr = Keystore::derive_address(pk, &cfg.oz_class_hash)?;
-                println!("   [{}] {}", i, addr);
+            for (i, acc) in accounts.iter().enumerate() {
+                let addr = Keystore::compute_address(acc, &cfg.oz_class_hash)?;
+                let alias_suffix = acc.alias.as_ref().map(|a| format!(" ({})", a)).unwrap_or_default();
+                println!("   [{}] {}{}", i, addr, alias_suffix);
             }
         },
         Commands::New => {
             println!("{}", cfg.messages.generating_new_account);
-            // 使用刚才读取到的密码直接加密
-            let updated = Keystore::add_new_account(&keystore, &password)?;
+            
+            let new_account = AccountConfig {
+                private_key: Keystore::generate_new_key(),
+                salt: None, // 默认使用公钥
+                class_hash: Some(cfg.oz_class_hash.clone()), // 绑定当前环境的 Class Hash
+                alias: None,
+                address: None, // 可以选择在这里计算并缓存
+            };
+
+            let updated = Keystore::add_account(&keystore, &password, new_account)?;
             save_keystore(&cfg.keystore_file, &updated)?;
             println!("{}", cfg.messages.new_account_created);
         },
         Commands::Balance { index } => {
-            let (addr, _, _) = get_account_info(index, &private_keys, cfg)?;
+            let (addr, _, _) = get_account_info(index, &accounts, cfg)?;
             let balance = network::get_balance(&cfg.rpc_url, &cfg.strk_contract_address, &addr).await?;
             let msg = cfg.messages.balance_fmt
                 .replace("{index}", &index.to_string())
@@ -117,14 +132,14 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
             println!("{}", msg);
         },
         Commands::Deploy { index } => {
-            let (addr, priv_felt, pub_felt) = get_account_info(index, &private_keys, cfg)?;
+            let (addr, priv_felt, pub_felt) = get_account_info(index, &accounts, cfg)?;
             println!("{}{}", cfg.messages.activating_account, addr);
             let tx = network::deploy_account(&cfg.rpc_url, &cfg.oz_class_hash, priv_felt, pub_felt, &cfg.messages.network_deploying).await?;
             println!("{}{}", cfg.messages.tx_sent, tx);
         },
         Commands::Transfer { from_index, to, amount } => {
             validate_target_address(to, &cfg.messages)?;
-            let (addr, priv_felt, _) = get_account_info(from_index, &private_keys, cfg)?;
+            let (addr, priv_felt, _) = get_account_info(from_index, &accounts, cfg)?;
             let msg = cfg.messages.sending_transfer_fmt
                 .replace("{from}", &from_index.to_string())
                 .replace("{amount}", &amount.to_string())
@@ -143,28 +158,69 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
             println!("{}{}", cfg.messages.transfer_success, tx);
         },
         Commands::Export { index } => {
-            if *index >= private_keys.len() {
+            if *index >= accounts.len() {
                 println!("{}", cfg.messages.index_out_of_bounds);
                 return Ok(());
             }
             println!("{}", cfg.messages.export_warning);
-            let pk = &private_keys[*index];
+            let acc = &accounts[*index];
+            let export_acc = prepare_export_account(acc, cfg)?;
+            // 导出完整的 JSON 配置
+            let json = serde_json::to_string_pretty(&export_acc)?;
             println!("{}", cfg.messages.export_result_fmt
-                .replace("{index}", &index.to_string())
-                .replace("{key}", pk));
+                .replace("{json}", &json));
+        },
+        Commands::Import { key } => {
+            let input = match key {
+                Some(k) => k.clone(),
+                None => {
+                    print!("{}", cfg.messages.import_enter_key);
+                    io::stdout().flush()?;
+                    prompt_password()?
+                }
+            };
+            
+            let input = input.trim();
+            
+            // 尝试解析为 JSON 配置，如果失败则视为普通私钥
+            let account_config = if input.starts_with('{') {
+                 serde_json::from_str::<AccountConfig>(input)
+                    .map_err(|_| anyhow::anyhow!("Invalid JSON config"))?
+            } else {
+                if Felt::from_hex(input).is_err() {
+                     println!("{}", cfg.messages.import_invalid_key);
+                     return Ok(());
+                }
+                AccountConfig {
+                    private_key: input.to_string(),
+                    salt: None,
+                    class_hash: Some(cfg.oz_class_hash.clone()),
+                    alias: None,
+                    address: None,
+                }
+            };
+
+            match Keystore::add_account(&keystore, &password, account_config) {
+                Ok(updated) => {
+                    save_keystore(&cfg.keystore_file, &updated)?;
+                    println!("{}", cfg.messages.import_success);
+                    println!("{}", cfg.messages.import_derivation_warning);
+                },
+                Err(_) => println!("{}", cfg.messages.import_exists),
+            }
         }
     }
     Ok(())
 }
 
 // 辅助：从索引获取账户信息
-fn get_account_info(index: &usize, keys: &[String], cfg: &Config) -> Result<(String, Felt, Felt)> {
-    if *index >= keys.len() {
+fn get_account_info(index: &usize, accounts: &[AccountConfig], cfg: &Config) -> Result<(String, Felt, Felt)> {
+    if *index >= accounts.len() {
         return Err(anyhow::anyhow!("{}", cfg.messages.index_out_of_bounds));
     }
-    let pk_hex = &keys[*index];
-    let addr = Keystore::derive_address(pk_hex, &cfg.oz_class_hash)?;
-    let priv_felt = Felt::from_hex(pk_hex)?;
+    let acc = &accounts[*index];
+    let addr = Keystore::compute_address(acc, &cfg.oz_class_hash)?;
+    let priv_felt = Felt::from_hex(&acc.private_key)?;
     let signer = SigningKey::from_secret_scalar(priv_felt);
     let pub_felt = signer.verifying_key().scalar();
     Ok((addr, priv_felt, pub_felt))
@@ -188,20 +244,21 @@ async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
     println!("===================================");
     
     // 修复点：正确解包 3 个返回值
-    let (current_keystore, private_keys, password) = load_and_decrypt(&cfg.keystore_file, &cfg.messages)?;
-    println!("{}", cfg.messages.decrypt_success_fmt.replace("{count}", &private_keys.len().to_string()));
+    let (current_keystore, accounts, password) = load_and_decrypt(&cfg.keystore_file, &cfg.messages)?;
+    println!("{}", cfg.messages.decrypt_success_fmt.replace("{count}", &accounts.len().to_string()));
 
-    let mut keys = private_keys;
+    let mut current_accounts = accounts;
     let mut keystore_obj = current_keystore;
     let pass = password; 
 
     loop {
         println!("\n{}", cfg.messages.account_list);
-        for (i, pk) in keys.iter().enumerate() {
-            let addr = Keystore::derive_address(pk, &cfg.oz_class_hash)?;
+        for (i, acc) in current_accounts.iter().enumerate() {
+            let addr = Keystore::compute_address(acc, &cfg.oz_class_hash)?;
             println!("   [{}] {}", i, &addr[0..10]);
         }
         println!("   {}", cfg.messages.menu_create_account);
+        println!("   {}", cfg.messages.menu_import_account);
         println!("   {}", cfg.messages.menu_quit);
         
         print!("\n{}", cfg.messages.menu_choice);
@@ -214,16 +271,62 @@ async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
             break;
         } else if choice == "N" {
             println!("{}", cfg.messages.generating_new_account);
-            let updated = Keystore::add_new_account(&keystore_obj, &pass)?;
+            let new_account = AccountConfig {
+                private_key: Keystore::generate_new_key(),
+                salt: None,
+                class_hash: Some(cfg.oz_class_hash.clone()),
+                alias: None,
+                address: None,
+            };
+            
+            let updated = Keystore::add_account(&keystore_obj, &pass, new_account)?;
             save_keystore(&cfg.keystore_file, &updated)?;
             // 更新内存状态
             keystore_obj = updated;
-            keys = keystore_obj.decrypt(&pass)?; 
+            current_accounts = keystore_obj.decrypt(&pass)?; 
             println!("{}", cfg.messages.new_account_created);
+        } else if choice == "I" {
+            print!("{}", cfg.messages.import_enter_key);
+            io::stdout().flush()?;
+            let input = prompt_password()?;
+            let input = input.trim();
+            
+            let account_config = if input.starts_with('{') {
+                 match serde_json::from_str::<AccountConfig>(input) {
+                    Ok(ac) => ac,
+                    Err(_) => {
+                        println!("❌ Invalid JSON");
+                        continue;
+                    }
+                 }
+            } else {
+                if Felt::from_hex(input).is_err() {
+                     println!("{}", cfg.messages.import_invalid_key);
+                     continue;
+                }
+                AccountConfig {
+                    private_key: input.to_string(),
+                    salt: None,
+                    class_hash: Some(cfg.oz_class_hash.clone()),
+                    alias: None,
+                    address: None,
+                }
+            };
+
+            match Keystore::add_account(&keystore_obj, &pass, account_config) {
+                Ok(updated) => {
+                    save_keystore(&cfg.keystore_file, &updated)?;
+                    keystore_obj = updated;
+                    current_accounts = keystore_obj.decrypt(&pass)?;
+                    println!("{}", cfg.messages.import_success);
+                    println!("{}", cfg.messages.import_derivation_warning);
+                },
+                Err(_) => println!("{}", cfg.messages.import_exists),
+            }
         } else if let Ok(index) = choice.parse::<usize>() {
-            if index < keys.len() {
+            if index < current_accounts.len() {
                 // 进入单账户操作
-                if let Err(e) = process_single_account_interactive(&keys[index], index, &keys, cfg).await {
+                if let Err(e) = process_single_account_interactive(&current_accounts[index], index, &current_accounts, cfg).await {
                     println!("❌ 错误: {}", e);
                 }
             }
@@ -234,12 +337,12 @@ async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
 
 // 交互模式下的单账户操作
 async fn process_single_account_interactive(
-    priv_key: &str, 
+    account: &AccountConfig, 
     idx: usize, 
-    all_keys: &[String],
+    all_accounts: &[AccountConfig],
     cfg: &Config
 ) -> Result<()> {
-    let addr = Keystore::derive_address(priv_key, &cfg.oz_class_hash)?;
+    let addr = Keystore::compute_address(account, &cfg.oz_class_hash)?;
     println!("\n{}", cfg.messages.account_details_title.replace("{index}", &idx.to_string()));
     println!("{}{}", cfg.messages.address_label, addr);
     
@@ -264,9 +367,9 @@ async fn process_single_account_interactive(
             let input = input.trim();
 
             let to_addr = if let Ok(target_idx) = input.parse::<usize>() {
-                if target_idx < all_keys.len() {
-                    let target_pk = &all_keys[target_idx];
-                    let addr = Keystore::derive_address(target_pk, &cfg.oz_class_hash)?;
+                if target_idx < all_accounts.len() {
+                    let target_acc = &all_accounts[target_idx];
+                    let addr = Keystore::compute_address(target_acc, &cfg.oz_class_hash)?;
                     println!("{}", cfg.messages.selected_local_account
                         .replace("{index}", &target_idx.to_string())
                         .replace("{addr}", &addr));
@@ -292,13 +395,13 @@ async fn process_single_account_interactive(
                 Err(_) => { println!("{}", cfg.messages.amount_invalid); return Ok(()); }
             };
             
-            let pk_felt = Felt::from_hex(priv_key)?;
+            let pk_felt = Felt::from_hex(&account.private_key)?;
             let tx = network::transfer_strk(&cfg.rpc_url, &cfg.strk_contract_address, &addr, pk_felt, &to_addr, amt, (&cfg.messages.network_building_tx, &cfg.messages.network_target_label, &cfg.messages.network_amount_label)).await?;
             println!("{}{}", cfg.messages.tx_sent, tx);
         },
         "A" => {
             if deployed { println!("{}", cfg.messages.already_activated); return Ok(()); }
-            let pk_felt = Felt::from_hex(priv_key)?;
+            let pk_felt = Felt::from_hex(&account.private_key)?;
             let signer = SigningKey::from_secret_scalar(pk_felt);
             let pub_felt = signer.verifying_key().scalar();
             let tx = network::deploy_account(&cfg.rpc_url, &cfg.oz_class_hash, pk_felt, pub_felt, &cfg.messages.network_deploying).await?;
@@ -306,9 +409,10 @@ async fn process_single_account_interactive(
         },
         "E" => {
             println!("{}", cfg.messages.export_warning);
+            let export_acc = prepare_export_account(account, cfg)?;
+            let json = serde_json::to_string_pretty(&export_acc)?;
             println!("{}", cfg.messages.export_result_fmt
-                .replace("{index}", &idx.to_string())
-                .replace("{key}", priv_key));
+                .replace("{json}", &json));
         },
         _ => {}
     }
@@ -318,7 +422,7 @@ async fn process_single_account_interactive(
 // ==================== 通用辅助函数 ====================
 
 /// 加载并解密，返回 (Keystore对象, 私钥列表, 密码字符串)
-fn load_and_decrypt(filepath: &str, msgs: &i18n::Messages) -> Result<(Keystore, Vec<String>, String)> {
+fn load_and_decrypt(filepath: &str, msgs: &i18n::Messages) -> Result<(Keystore, Vec<AccountConfig>, String)> {
     print!("{}", msgs.enter_password);
     io::stdout().flush()?;
     let password = prompt_password()?;
@@ -336,6 +440,31 @@ fn prompt_password() -> Result<String> {
     Ok(rpassword::read_password()?.trim().to_string())
 }
 
+fn prepare_export_account(acc: &AccountConfig, cfg: &Config) -> Result<AccountConfig> {
+    let mut export_acc = acc.clone();
+
+    // 1. 补全 Address
+    if export_acc.address.is_none() {
+        let addr = Keystore::compute_address(acc, &cfg.oz_class_hash)?;
+        export_acc.address = Some(addr);
+    }
+
+    // 2. 补全 Class Hash
+    if export_acc.class_hash.is_none() {
+        export_acc.class_hash = Some(cfg.oz_class_hash.clone());
+    }
+
+    // 3. 补全 Salt
+    if export_acc.salt.is_none() {
+        let priv_felt = Felt::from_hex(&export_acc.private_key)?;
+        let signer = SigningKey::from_secret_scalar(priv_felt);
+        let public_key = signer.verifying_key().scalar();
+        export_acc.salt = Some(format!("{:#x}", public_key));
+    }
+
+    Ok(export_acc)
+}
+
 fn save_keystore(filepath: &str, keystore: &Keystore) -> Result<()> {
     let json = serde_json::to_string_pretty(keystore)?;
     std::fs::write(filepath, json)?;
@@ -343,14 +472,21 @@ fn save_keystore(filepath: &str, keystore: &Keystore) -> Result<()> {
 }
 
 fn initialize_new_wallet(filename: &str, msgs: &i18n::Messages) -> Result<()> {
-    let priv_key = Keystore::generate_new_key();
     println!("{}", msgs.init_new_wallet);
     print!("{}", msgs.set_password);
     io::stdout().flush()?;
     let password = prompt_password()?;
     
-    let keys = vec![priv_key];
-    let keystore = Keystore::encrypt(&password, &keys)?;
+    // 初始化时创建一个默认账户，不指定 Class Hash (使用运行时默认)
+    let first_account = AccountConfig {
+        private_key: Keystore::generate_new_key(),
+        salt: None,
+        class_hash: None, 
+        alias: Some("Main".to_string()),
+        address: None,
+    };
+    
+    let keystore = Keystore::encrypt(&password, &[first_account])?;
     save_keystore(filename, &keystore)?;
     println!("{}", msgs.wallet_init_complete);
     Ok(())
