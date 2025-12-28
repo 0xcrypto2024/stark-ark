@@ -141,3 +141,86 @@ pub async fn transfer_strk(
 
     Ok(format!("{:#x}", result.transaction_hash))
 }
+
+// ==================== 批量转账 (Multicall) ====================
+pub async fn multi_transfer_strk(
+    rpc_url: &str,
+    strk_contract: &str,
+    sender_address: &str,
+    private_key: Felt,
+    recipients: Vec<(String, f64)>, // (Address, Amount)
+    log_msg: &str
+) -> Result<String> {
+    let url = Url::parse(rpc_url)?;
+    let provider = JsonRpcClient::new(HttpTransport::new(url));
+    let chain_id = provider.chain_id().await?;
+    let signer = LocalWallet::from(SigningKey::from_secret_scalar(private_key));
+    let sender_felt = Felt::from_hex(sender_address)?;
+
+    let account = SingleOwnerAccount::new(
+        provider,
+        signer,
+        sender_felt,
+        chain_id,
+        ExecutionEncoding::New,
+    );
+
+    let contract_address = Felt::from_hex(strk_contract)?;
+    let selector = get_selector_from_name("transfer")?;
+
+    let mut calls = Vec::new();
+    for (recipient_addr, amount) in recipients {
+        let recipient_felt = Felt::from_hex(&recipient_addr)?;
+        let amount_wei = (amount * 1_000_000_000_000_000_000.0) as u128;
+        let amount_low = Felt::from(amount_wei);
+        let amount_high = Felt::ZERO;
+
+        calls.push(Call {
+            to: contract_address,
+            selector,
+            calldata: vec![recipient_felt, amount_low, amount_high],
+        });
+    }
+
+    println!("{}", log_msg);
+
+    let result = account
+        .execute_v3(calls)
+        .send()
+        .await?;
+
+    Ok(format!("{:#x}", result.transaction_hash))
+}
+
+// ==================== 估算转账费用 ====================
+pub async fn estimate_transfer_fee(
+    rpc_url: &str,
+    strk_contract: &str,
+    sender_address: &str,
+    private_key: Felt,
+    recipient_address: &str,
+    amount: f64
+) -> Result<f64> {
+    let url = Url::parse(rpc_url)?;
+    let provider = JsonRpcClient::new(HttpTransport::new(url));
+    let chain_id = provider.chain_id().await?;
+    let signer = LocalWallet::from(SigningKey::from_secret_scalar(private_key));
+    let sender_felt = Felt::from_hex(sender_address)?;
+
+    let account = SingleOwnerAccount::new(provider, signer, sender_felt, chain_id, ExecutionEncoding::New);
+
+    let amount_wei = (amount * 1_000_000_000_000_000_000.0) as u128;
+    let recipient_felt = Felt::from_hex(recipient_address)?;
+    let contract_address = Felt::from_hex(strk_contract)?;
+
+    let call = Call {
+        to: contract_address,
+        selector: get_selector_from_name("transfer")?,
+        calldata: vec![recipient_felt, Felt::from(amount_wei), Felt::ZERO],
+    };
+
+    let estimate = account.execute_v3(vec![call]).estimate_fee().await?;
+    
+    let overall_fee_u128: u128 = estimate.overall_fee.try_into().unwrap_or(0);
+    Ok(overall_fee_u128 as f64 / 1_000_000_000_000_000_000.0)
+}

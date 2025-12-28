@@ -64,6 +64,33 @@ enum Commands {
         #[arg(short, long)]
         key: Option<String>,
     },
+    /// 📤 Distribute funds from one account to many
+    Distribute {
+        /// Sender account index
+        #[arg(short, long)]
+        from_index: usize,
+        /// Start index of recipient accounts
+        #[arg(long)]
+        start_index: usize,
+        /// End index of recipient accounts (inclusive)
+        #[arg(long)]
+        end_index: usize,
+        /// Amount per recipient (STRK)
+        #[arg(short, long)]
+        amount: f64,
+    },
+    /// 🧹 Sweep funds from many accounts to one
+    Sweep {
+        /// Start index of source accounts
+        #[arg(long)]
+        start_index: usize,
+        /// End index of source accounts (inclusive)
+        #[arg(long)]
+        end_index: usize,
+        /// Recipient account index
+        #[arg(short, long)]
+        to_index: usize,
+    },
     /// ⚙️ Configuration management
     Config {
         #[command(subcommand)]
@@ -269,6 +296,66 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
                     println!("{}", cfg.messages.import_derivation_warning);
                 },
                 Err(_) => println!("{}", cfg.messages.import_exists),
+            }
+        },
+        Commands::Distribute { from_index, start_index, end_index, amount } => {
+            let (sender_addr, priv_felt, _) = get_account_info(from_index, &accounts, cfg)?;
+            
+            let mut recipients = Vec::new();
+            for i in *start_index..=*end_index {
+                // Skip self
+                if i == *from_index { continue; }
+                let (addr, _, _) = get_account_info(&i, &accounts, cfg)?;
+                recipients.push((addr, *amount));
+            }
+
+            if recipients.is_empty() {
+                println!("⚠️  No recipients found.");
+                return Ok(());
+            }
+
+            println!("{}", cfg.messages.distribute_start);
+            let tx = network::multi_transfer_strk(
+                &cfg.rpc_url,
+                &cfg.strk_contract_address,
+                &sender_addr,
+                priv_felt,
+                recipients,
+                &cfg.messages.network_building_tx
+            ).await?;
+            println!("{}{}", cfg.messages.distribute_success, tx);
+        },
+        Commands::Sweep { start_index, end_index, to_index } => {
+            let (to_addr, _, _) = get_account_info(to_index, &accounts, cfg)?;
+            println!("{}", cfg.messages.sweep_start);
+
+            for i in *start_index..=*end_index {
+                if i == *to_index { continue; }
+                
+                let (from_addr, priv_felt, _) = get_account_info(&i, &accounts, cfg)?;
+                println!("{}", cfg.messages.sweep_process_account.replace("{index}", &i.to_string()).replace("{addr}", &from_addr));
+
+                let balance = network::get_balance(&cfg.rpc_url, &cfg.strk_contract_address, &from_addr).await?;
+                
+                // Estimate fee (dummy amount for estimation)
+                let estimated_fee = match network::estimate_transfer_fee(&cfg.rpc_url, &cfg.strk_contract_address, &from_addr, priv_felt, &to_addr, 0.001).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        println!("   ❌ Fee estimation failed: {}", e);
+                        continue;
+                    }
+                };
+
+                // Calculate max sendable amount (Balance - Fee * 1.2 buffer)
+                let amount_to_send = balance - (estimated_fee * 1.2);
+
+                if amount_to_send <= 0.0 {
+                    println!("   {}", cfg.messages.sweep_skip_low_balance.replace("{balance}", &format!("{:.4}", balance)));
+                    continue;
+                }
+
+                let tx = network::transfer_strk(&cfg.rpc_url, &cfg.strk_contract_address, &from_addr, priv_felt, &to_addr, amount_to_send, (&cfg.messages.network_building_tx, &cfg.messages.network_target_label, &cfg.messages.network_amount_label)).await?;
+                println!("   {}", cfg.messages.sweep_success.replace("{amount}", &format!("{:.4}", amount_to_send)).replace("{hash}", &tx));
             }
         },
         Commands::Config { .. } | Commands::Version => {}

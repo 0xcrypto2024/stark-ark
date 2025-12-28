@@ -1,6 +1,6 @@
 [package]
 name = "stark-ark"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 description = "A secure, Rust-based CLI wallet and library for Starknet."
 license = "MIT"

@@ -50,6 +50,12 @@ pub struct Messages {
     pub import_derivation_warning: String,
     pub error_prefix: String,
     pub env_var_missing: String,
+    pub distribute_start: String,
+    pub distribute_success: String,
+    pub sweep_start: String,
+    pub sweep_process_account: String,
+    pub sweep_skip_low_balance: String,
+    pub sweep_success: String,
 }
 
 impl Default for Messages {
@@ -104,6 +110,12 @@ impl Default for Messages {
             import_derivation_warning: "⚠️  Note: Address is derived using default parameters (Salt=PubKey). Accounts created with different salts/class hashes won't appear.".to_string(),
             error_prefix: "❌ Error: ".to_string(),
             env_var_missing: "❌ Missing environment variable in .env: {var}".to_string(),
+            distribute_start: "🚀 Starting distribution...".to_string(),
+            distribute_success: "✅ Distribution complete! Tx Hash: ".to_string(),
+            sweep_start: "🧹 Starting sweep...".to_string(),
+            sweep_process_account: "⚙️  Processing Account [{index}] ({addr})...".to_string(),
+            sweep_skip_low_balance: "⏭️  Skipping (Low Balance: {balance} STRK)".to_string(),
+            sweep_success: "✅ Swept {amount} STRK. Tx: {hash}".to_string(),
         }
     }
 }
@@ -159,6 +171,12 @@ impl Messages {
             import_derivation_warning: "⚠️  注意：地址是基于默认参数（Salt=公钥）计算的。如果您的账户使用了不同的 Salt 或 Class Hash，将无法在此显示。".to_string(),
             error_prefix: "❌ 错误: ".to_string(),
             env_var_missing: "❌ 未在 .env 中找到 {var}".to_string(),
+            distribute_start: "🚀 开始批量分发...".to_string(),
+            distribute_success: "✅ 分发完成！交易 Hash: ".to_string(),
+            sweep_start: "🧹 开始归集...".to_string(),
+            sweep_process_account: "⚙️  正在处理账户 [{index}] ({addr})...".to_string(),
+            sweep_skip_low_balance: "⏭️  跳过 (余额不足: {balance} STRK)".to_string(),
+            sweep_success: "✅ 已归集 {amount} STRK. 交易: {hash}".to_string(),
         }
     }
 }
