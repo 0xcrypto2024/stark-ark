@@ -1,11 +1,8 @@
-mod keystore;
-mod network;
-mod config;
-mod i18n;
-
 use clap::{Parser, Subcommand};
-use keystore::{Keystore, AccountConfig};
-use config::Config;
+use stark_ark::keystore::{Keystore, AccountConfig};
+use stark_ark::config::Config;
+use stark_ark::network;
+use stark_ark::i18n;
 use anyhow::Result;
 use std::path::Path;
 use std::io::{self, Write};

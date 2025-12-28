@@ -1,7 +1,15 @@
 [package]
 name = "stark-ark"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
+description = "A secure, Rust-based CLI wallet and library for Starknet."
+license = "MIT"
+repository = "https://github.com/0xcrypto2024/stark-ark"
+exclude = [
+    ".env",
+    "keystore.json",
+    ".github"
+]
 
 [dependencies]
 # 读取env文件
