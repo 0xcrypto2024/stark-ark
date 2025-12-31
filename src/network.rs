@@ -1,19 +1,23 @@
-use starknet::{
-    // ❌ 删除这里的 Call
-    accounts::{AccountFactory, OpenZeppelinAccountFactory, Account, SingleOwnerAccount, ExecutionEncoding},
-    core::{
-        // ✅ Call 移到了这里 (core::types)
-        types::{BlockId, BlockTag, Felt, FunctionCall, Call}, 
-        utils::get_selector_from_name,
-    },
-    providers::{jsonrpc::HttpTransport, JsonRpcClient, Provider},
-    signers::{LocalWallet, SigningKey},
-};
+use starknet::core::types::{BlockId, BlockTag, Call, FunctionCall, Felt};
+use starknet::providers::{jsonrpc::HttpTransport, JsonRpcClient, Provider};
+use starknet::accounts::{Account, SingleOwnerAccount, ExecutionEncoding};
+use starknet::signers::{LocalWallet, SigningKey};
+use starknet::core::utils::get_selector_from_name;
+use starknet::accounts::{AccountFactory, OpenZeppelinAccountFactory};
 use url::Url;
 use anyhow::Result;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone)]
+pub struct AccountPoolInfo {
+    pub staked_amount: f64,
+    pub unpool_amount: f64,
+    pub unpool_time: u64,
+}
 
 // ==================== 查余额 ====================
 pub async fn get_balance(rpc_url: &str, strk_contract: &str, user_address_str: &str) -> Result<f64> {
+
     let url = Url::parse(rpc_url)?;
     let provider = JsonRpcClient::new(HttpTransport::new(url));
 
@@ -338,19 +342,18 @@ pub async fn delegate_strk(
     Ok(format!("{:#x}", result.transaction_hash))
 }
 
-// ==================== 查询质押余额 ====================
-pub async fn get_staked_balance(
+// ==================== 查询账户质押信息 (Get Account Pool Info) ====================
+pub async fn get_account_pool_info(
     rpc_url: &str,
     pool_contract: &str,
     user_address: &str
-) -> Result<f64> {
+) -> Result<AccountPoolInfo> {
     let url = Url::parse(rpc_url)?;
     let provider = JsonRpcClient::new(HttpTransport::new(url));
 
     let contract_address = Felt::from_hex(pool_contract)?;
     let user_felt = Felt::from_hex(user_address)?;
     
-    // Correct selector for Delegation Pool (v1)
     let selector = get_selector_from_name("get_pool_member_info_v1")?;
 
     let call_request = FunctionCall {
@@ -361,32 +364,141 @@ pub async fn get_staked_balance(
 
     match provider.call(call_request, BlockId::Tag(BlockTag::Latest)).await {
         Ok(res) => {
-            // PoolMemberInfo struct typical layout:
-            // {
-            //   amount: Amount (u128),     <- Index 0
-            //   reward_address: Address,   <- Index 1
-            //   ...
-            // }
-            // Debugging to be sure
-            // Debug logging to be sure
-            // println!("🔍 Debug: get_pool_member_info raw response: {:?}", res);
             
-            // Debug confirms:
-            // Index 0: 0x0
-            // Index 1: Reward Address (User)
-            // Index 2: Amount (1.0 STRK) => 0xde0b6b3a7640000
+            // Relaxed parsing:
+            // Staked Amount (Indices 2, 3) is always present if len >= 4
+            // Unpooled info might be missing or optional?
             
-            if res.len() > 2 {
-                let amount_felt = res[2];
-                let balance_u128: u128 = match amount_felt.try_into() { Ok(val) => val, Err(_) => 0 };
-                Ok(balance_u128 as f64 / 1_000_000_000_000_000_000.0)
-            } else {
-                Ok(0.0)
+            let mut staked_amount = 0.0;
+            let mut unpool_amount = 0.0;
+            let mut unpool_time = 0;
+
+            if res.len() >= 4 {
+                let amount_low: u128 = res[2].try_into().unwrap_or(0);
+                staked_amount = amount_low as f64 / 1_000_000_000_000_000_000.0;
             }
+
+            if res.len() >= 8 {
+                let unpool_low: u128 = res[5].try_into().unwrap_or(0);
+                unpool_amount = unpool_low as f64 / 1_000_000_000_000_000_000.0;
+                unpool_time = res[7].try_into().unwrap_or(0);
+            }
+
+            // Remove debug print for clean output
+            
+            Ok(AccountPoolInfo {
+                staked_amount,
+                unpool_amount,
+                unpool_time,
+            })
         },
-        Err(e) => {
-            println!("Debug: Failed to get staked balance: {:?}", e);
-            Ok(0.0)
+        Err(_) => {
+            // Pool might not exist or user not in it
+            Ok(AccountPoolInfo { staked_amount: 0.0, unpool_amount: 0.0, unpool_time: 0 })
         }
     }
+}
+
+// Keep legacy-like signature for compatibility/convenience if needed, but better to upgrade callers.
+// Helper to just get staked (legacy uses)
+pub async fn get_staked_balance(
+    rpc_url: &str,
+    pool_contract: &str,
+    user_address: &str
+) -> Result<f64> {
+     let info = get_account_pool_info(rpc_url, pool_contract, user_address).await?;
+     Ok(info.staked_amount)
+}
+
+// ==================== 解除质押意图 (Unstake Intent) ====================
+pub async fn unstake_intent(
+    rpc_url: &str,
+    pool_contract: &str,
+    sender_address: &str,
+    private_key: Felt,
+    amount: f64
+) -> Result<String> {
+    let url = Url::parse(rpc_url)?;
+    let provider = JsonRpcClient::new(HttpTransport::new(url));
+    let chain_id = provider.chain_id().await?;
+    let signer = LocalWallet::from(SigningKey::from_secret_scalar(private_key));
+    let sender_felt = Felt::from_hex(sender_address)?;
+
+    let account = SingleOwnerAccount::new(
+        provider,
+        signer,
+        sender_felt,
+        chain_id,
+        ExecutionEncoding::New,
+    );
+
+    let amount_wei = (amount * 1_000_000_000_000_000_000.0) as u128;
+    let amount_low = Felt::from(amount_wei);
+
+    let pool_address_felt = Felt::from_hex(pool_contract)?;
+
+    // Call: exit_delegation_pool_intent(amount)
+    let call = Call {
+        to: pool_address_felt,
+        selector: get_selector_from_name("exit_delegation_pool_intent")?,
+        calldata: vec![amount_low], 
+    };
+
+    let result = account
+        .execute_v3(vec![call])
+        .send()
+        .await?;
+
+    Ok(format!("{:#x}", result.transaction_hash))
+}
+
+// ==================== 解除质押动作 (Unstake Action / Withdraw) ====================
+pub async fn unstake_action(
+    rpc_url: &str,
+    pool_contract: &str,
+    sender_address: &str,
+    private_key: Felt
+) -> Result<String> {
+    let url = Url::parse(rpc_url)?;
+    let provider = JsonRpcClient::new(HttpTransport::new(url));
+    let chain_id = provider.chain_id().await?;
+    let signer = LocalWallet::from(SigningKey::from_secret_scalar(private_key));
+    let sender_felt = Felt::from_hex(sender_address)?;
+
+    let account = SingleOwnerAccount::new(
+        provider,
+        signer,
+        sender_felt,
+        chain_id,
+        ExecutionEncoding::New,
+    );
+
+    let pool_address_felt = Felt::from_hex(pool_contract)?;
+
+    // Check for pending unstake
+    let info = get_account_pool_info(rpc_url, pool_contract, sender_address).await?;
+    
+    if info.unpool_amount <= 0.0 {
+        return Err(anyhow::anyhow!("No pending unstake funds found. You must 'unstake' (start intent) first."));
+    }
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    if info.unpool_time > now {
+         let wait = info.unpool_time - now;
+         return Err(anyhow::anyhow!("Unstake funds not ready yet. Please wait {} seconds.", wait));
+    }
+
+    // Call: exit_delegation_pool_action(pool_member)
+    let call = Call {
+        to: pool_address_felt,
+        selector: get_selector_from_name("exit_delegation_pool_action")?,
+        calldata: vec![sender_felt],
+    };
+
+    let result = account
+        .execute_v3(vec![call])
+        .send()
+        .await?;
+
+    Ok(format!("{:#x}", result.transaction_hash))
 }

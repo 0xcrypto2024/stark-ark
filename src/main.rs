@@ -1,4 +1,6 @@
+use comfy_table::{Table, presets::UTF8_FULL, Cell, Color, Attribute}; // Added comfy_table
 use clap::{Parser, Subcommand};
+use rpassword;
 use stark_ark::keystore::{Keystore, AccountConfig};
 use stark_ark::config::Config;
 use stark_ark::network;
@@ -6,6 +8,7 @@ use stark_ark::i18n;
 use anyhow::Result;
 use std::path::Path;
 use std::io::{self, Write};
+use chrono::{Utc, TimeZone}; // Added chrono
 use starknet::core::types::Felt;
 use starknet::signers::SigningKey;
 use qrcode::QrCode;
@@ -112,6 +115,29 @@ enum Commands {
         #[arg(short, long)]
         amount: Option<f64>,
     },
+    /// 📉 Unstake funds (Signal Intent)
+    Unstake {
+        /// Account index
+        #[arg(short, long)]
+        index: usize,
+        /// Validator Address (Optional)
+        #[arg(long)]
+        validator: Option<String>,
+        /// Amount to unstake
+        #[arg(short, long)]
+        amount: Option<f64>,
+    },
+    /// 💸 Withdraw unstaked funds (Action)
+    Withdraw {
+        /// Account index
+        #[arg(short, long)]
+        index: usize,
+        /// Validator Address (Optional)
+        #[arg(long)]
+        validator: Option<String>,
+    },
+    /// 📊 Overview of all accounts
+    Overview,
 }
 
 #[derive(Subcommand)]
@@ -196,6 +222,72 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+
+
+async fn show_overview_table(accounts: &[AccountConfig], cfg: &Config) -> Result<()> {
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(comfy_table::ContentArrangement::Dynamic)
+        .set_header(vec![
+            Cell::new("Idx").add_attribute(Attribute::Bold),
+            Cell::new("Address").add_attribute(Attribute::Bold),
+            Cell::new("Alias").add_attribute(Attribute::Bold),
+            Cell::new("Balance").add_attribute(Attribute::Bold),
+            Cell::new("Staked").add_attribute(Attribute::Bold),
+            Cell::new("Pending").add_attribute(Attribute::Bold),
+            Cell::new("Total").add_attribute(Attribute::Bold),
+        ]);
+
+    println!("Fetching data for {} accounts...", accounts.len());
+
+    for (i, acc) in accounts.iter().enumerate() {
+        let addr = Keystore::compute_address(acc, &cfg.oz_class_hash)?;
+        // Short address format: 0x1234...5678
+        let short_addr = if addr.len() > 10 {
+            format!("{}...{}", &addr[0..6], &addr[addr.len()-4..])
+        } else {
+            addr.clone()
+        };
+        
+        let alias = acc.alias.clone().unwrap_or_default();
+        
+        // Fetch Balance
+        let balance = network::get_balance(&cfg.rpc_url, &cfg.strk_contract_address, &addr).await.unwrap_or(0.0);
+        
+        // Fetch Staked Info
+        let mut staked = 0.0;
+        let mut pending = 0.0;
+        
+        if !cfg.default_staker_address.is_empty() {
+             if let Ok(pool_addr) = network::get_pool_address(&cfg.rpc_url, &cfg.staking_contract_address, &cfg.default_staker_address).await {
+                 if let Ok(info) = network::get_account_pool_info(&cfg.rpc_url, &pool_addr, &addr).await {
+                     staked = info.staked_amount;
+                     pending = info.unpool_amount;
+                 }
+             }
+        }
+        
+        let total = balance + staked + pending;
+        
+        table.add_row(vec![
+            Cell::new(i.to_string()),
+            Cell::new(short_addr),
+            Cell::new(alias),
+            Cell::new(format!("{:.4}", balance)),
+            Cell::new(format!("{:.4}", staked)).fg(if staked > 0.0 { Color::Green } else { Color::White }),
+            Cell::new(format!("{:.4}", pending)).fg(if pending > 0.0 { Color::Yellow } else { Color::White }),
+            Cell::new(format!("{:.4}", total)),
+        ]);
+        
+        // Small delay/yield not really needed for sequential but keeps UI responsive-ish if printed incrementally? 
+        // No, table prints at end.
+    }
+
+    println!("{table}");
+    Ok(())
+}
+
 // ==================== CLI 模式逻辑 ====================
 
 async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
@@ -254,12 +346,24 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
             if !cfg.default_staker_address.is_empty() {
                 // Silently attempt to resolve pool and get balance
                 if let Ok(pool_addr) = network::get_pool_address(&cfg.rpc_url, &cfg.staking_contract_address, &cfg.default_staker_address).await {
-                     match network::get_staked_balance(&cfg.rpc_url, &pool_addr, &addr).await {
-                         Ok(staked) => {
-                             if staked > 0.0 {
-                                 println!("🥩 Staked Balance: {:.4} STRK", staked);
+                     match network::get_account_pool_info(&cfg.rpc_url, &pool_addr, &addr).await {
+                         Ok(info) => {
+                             if info.staked_amount > 0.0 {
+                                 println!("🥩 Staked Balance: {:.4} STRK", info.staked_amount);
                              } else {
                                  println!("🥩 Staked Balance: 0.0000 STRK");
+                             }
+
+                             if info.unpool_amount > 0.0 {
+                                 let now = Utc::now().timestamp() as u64;
+                                 let ready_time = Utc.timestamp_opt(info.unpool_time as i64, 0).unwrap();
+                                 println!("⏳ Pending Unstake: {:.4} STRK", info.unpool_amount);
+                                 
+                                 if info.unpool_time <= now {
+                                     println!("   ✅ READY TO WITHDRAW (Use 'withdraw' command)");
+                                 } else {
+                                     println!("   🕒 Available at: {}", ready_time.format("%Y-%m-%d %H:%M:%S UTC"));
+                                 }
                              }
                          },
                          Err(_) => {} 
@@ -277,21 +381,62 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
             validate_target_address(to, &cfg.messages)?;
             let (addr, priv_felt, _) = get_account_info(from_index, &accounts, cfg)?;
             let msg = cfg.messages.sending_transfer_fmt
-                .replace("{from}", &from_index.to_string())
                 .replace("{amount}", &amount.to_string())
                 .replace("{to}", to);
-            println!("{}", msg);
             
-            let tx = network::transfer_strk(
-                &cfg.rpc_url, 
-                &cfg.strk_contract_address, 
-                &addr, 
-                priv_felt, 
-                to, 
-                *amount,
-                (&cfg.messages.network_building_tx, &cfg.messages.network_target_label, &cfg.messages.network_amount_label)
-            ).await?;
-            println!("{}{}", cfg.messages.transfer_success, tx);
+            println!("{}", msg);
+            let tx = network::transfer_strk(&cfg.rpc_url, &cfg.strk_contract_address, &addr, priv_felt, to, *amount, (&cfg.messages.network_building_tx, &cfg.messages.network_target_label, &cfg.messages.network_amount_label)).await?;
+            println!("{}{}", cfg.messages.tx_sent, tx);
+        },
+        Commands::Overview => {
+            show_overview_table(&accounts, cfg).await?;
+        },
+        Commands::Stake { index, amount, validator } => {
+            // 1. Resolve Staker Address
+             let staker_addr = if let Some(v) = validator {
+                 if !v.is_empty() {
+                     v.clone()
+                 } else if !cfg.default_staker_address.is_empty() {
+                     println!("Using default staker: {}", cfg.default_staker_address);
+                     cfg.default_staker_address.clone()
+                 } else {
+                     println!("❌ No validator address provided. Use --validator or set default in config.");
+                     return Ok(());
+                 }
+             } else if !cfg.default_staker_address.is_empty() {
+                 println!("Using default staker: {}", cfg.default_staker_address);
+                 cfg.default_staker_address.clone()
+             } else {
+                 println!("❌ No validator address provided. Use --validator or set default in config.");
+                 return Ok(());
+             };
+
+             let (addr, priv_felt, _) = get_account_info(index, &accounts, cfg)?;
+             
+             // Get amount (prompt if not provided)
+             let stake_amount = if let Some(amt) = amount {
+                 *amt
+             } else {
+                 print!("Enter amount to stake: ");
+                 io::stdout().flush()?;
+                 let mut amt_str = String::new();
+                 io::stdin().read_line(&mut amt_str)?;
+                 amt_str.trim().parse::<f64>().unwrap_or(0.0)
+             };
+             
+             // 2. Resolve Pool Address
+             let pool_addr = network::get_pool_address(&cfg.rpc_url, &cfg.staking_contract_address, &staker_addr).await?;
+
+             // 3. Delegate Logic (Smart)
+             let tx = network::delegate_strk(
+                 &cfg.rpc_url,
+                 &cfg.strk_contract_address, // Token contract
+                 &pool_addr,                 // Pool contract
+                 &addr,                      // Sender
+                 priv_felt,                  // Private Key
+                 stake_amount
+             ).await?;
+             println!("🎉 Stake Transaction Sent: {}", tx);
         },
         Commands::Export { index } => {
             if *index >= accounts.len() {
@@ -405,90 +550,92 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
                 println!("   {}", cfg.messages.sweep_success.replace("{amount}", &format!("{:.4}", amount_to_send)).replace("{hash}", &tx));
             }
         },
-        Commands::Stake { index, validator, amount } => {
+        Commands::Unstake { index, validator, amount } => {
             let (addr, priv_felt, _) = get_account_info(index, &accounts, cfg)?;
             
-            // 1. Resolve Staker Address
+            // 1. Resolve Staker
             let staker_addr = match validator {
-                Some(v) => v.clone(),
-                None => {
-                    if !cfg.default_staker_address.is_empty() {
-                        println!("Using default staker: {}", cfg.default_staker_address);
-                        cfg.default_staker_address.clone()
-                    } else {
-                        print!("Enter Validator (Staker) Address: ");
-                        io::stdout().flush()?;
-                        let mut input = String::new();
-                        io::stdin().read_line(&mut input)?;
-                        let input = input.trim();
-                        if input.is_empty() {
-                            println!("❌ Validator address required.");
-                            return Ok(());
-                        }
-                        input.to_string()
-                    }
-                }
+                 Some(v) => v.clone(),
+                 None => {
+                     if !cfg.default_staker_address.is_empty() {
+                         println!("Using default staker: {}", cfg.default_staker_address);
+                         cfg.default_staker_address.clone()
+                     } else {
+                         print!("Enter Validator (Staker) Address: ");
+                         io::stdout().flush()?;
+                         let mut input = String::new();
+                         io::stdin().read_line(&mut input)?;
+                         let input = input.trim();
+                         if input.is_empty() { println!("❌ Validator address required."); return Ok(()); }
+                         input.to_string()
+                     }
+                 }
             };
 
             // 2. Resolve Amount
-            let stake_amount = match amount {
+            let unstake_amount = match amount {
                 Some(a) => *a,
                 None => {
-                    print!("Enter Amount to Stake (STRK): ");
+                    print!("Enter Amount to Unstake (STRK): ");
                     io::stdout().flush()?;
                     let mut input = String::new();
                     io::stdin().read_line(&mut input)?;
-                    match input.trim().parse::<f64>() {
+                     match input.trim().parse::<f64>() {
                         Ok(v) => v,
-                        Err(_) => {
-                            println!("❌ Invalid amount.");
-                            return Ok(());
-                        }
+                        Err(_) => { println!("❌ Invalid amount."); return Ok(()); }
                     }
                 }
             };
 
-            // 3. Resolve Pool Address
+            // 3. Resolve Pool
             println!("🔍 Resolving Pool Address for Staker: {}...", staker_addr);
             let pool_addr = match network::get_pool_address(&cfg.rpc_url, &cfg.staking_contract_address, &staker_addr).await {
-                Ok(p) => {
-                    println!("✅ Found Pool Contract: {}", p);
-                    p
-                },
-                Err(e) => {
-                    println!("⚠️  Failed to resolve Pool Address automatically: {}", e);
-                    print!("Please enter Pool Contract Address manually (or press Enter to abort): ");
-                    io::stdout().flush()?;
-                    let mut input = String::new();
-                    io::stdin().read_line(&mut input)?;
-                    let input = input.trim();
-                    if input.is_empty() {
-                        println!("🚫 Aborted.");
-                        return Ok(());
-                    }
-                    input.to_string()
-                }
+                Ok(p) => { println!("✅ Found Pool Contract: {}", p); p },
+                Err(e) => { println!("⚠️  Failed to resolve Pool: {}", e); return Ok(()); }
             };
 
-            // 4. Execute Delegation (Multicall)
-            let tx = match network::delegate_strk(
-                &cfg.rpc_url,
-                &cfg.strk_contract_address,
-                &pool_addr,
-                &addr,
-                priv_felt,
-                stake_amount
-            ).await {
+            // 4. Execute Intent
+            let tx = match network::unstake_intent(&cfg.rpc_url, &pool_addr, &addr, priv_felt, unstake_amount).await {
                 Ok(hash) => hash,
-                Err(e) => {
-                    println!("❌ Transaction Failed!");
-                    println!("Error Details: {:?}", e);
-                    return Ok(());
-                }
+                Err(e) => { println!("❌ Unstake Intent Failed: {:?}", e); return Ok(()); }
             };
+            println!("🎉 Unstake Intent Sent!\nTransaction Hash: {}", tx);
+        },
+        Commands::Withdraw { index, validator } => {
+            let (addr, priv_felt, _) = get_account_info(index, &accounts, cfg)?;
             
-            println!("🎉 Staking Success!");
-            println!("Transaction Hash: {}", tx);
+            // 1. Resolve Staker
+            let staker_addr = match validator {
+                 Some(v) => v.clone(),
+                 None => {
+                     if !cfg.default_staker_address.is_empty() {
+                         println!("Using default staker: {}", cfg.default_staker_address);
+                         cfg.default_staker_address.clone()
+                     } else {
+                         print!("Enter Validator (Staker) Address: ");
+                         io::stdout().flush()?;
+                         let mut input = String::new();
+                         io::stdin().read_line(&mut input)?;
+                         let input = input.trim();
+                         if input.is_empty() { println!("❌ Validator address required."); return Ok(()); }
+                         input.to_string()
+                     }
+                 }
+            };
+
+            // 2. Resolve Pool
+            println!("🔍 Resolving Pool Address for Staker: {}...", staker_addr);
+            let pool_addr = match network::get_pool_address(&cfg.rpc_url, &cfg.staking_contract_address, &staker_addr).await {
+                Ok(p) => { println!("✅ Found Pool Contract: {}", p); p },
+                Err(e) => { println!("⚠️  Failed to resolve Pool: {}", e); return Ok(()); }
+            };
+
+            // 3. Execute Action
+            let tx = match network::unstake_action(&cfg.rpc_url, &pool_addr, &addr, priv_felt).await {
+                Ok(hash) => hash,
+                Err(e) => { println!("❌ Withdraw Action Failed: {:?}", e); return Ok(()); }
+            };
+             println!("🎉 Withdraw Action Sent!\nTransaction Hash: {}", tx);
         },
         _ => {}
     }
@@ -543,6 +690,7 @@ async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
         println!("   {}", cfg.messages.menu_create_account);
         println!("   {}", cfg.messages.menu_import_account);
         println!("   [V] View Validators");
+        println!("   [O] 📊 Overview (All Accounts)");
         println!("   {}", cfg.messages.menu_quit);
         
         print!("\n{}", cfg.messages.menu_choice);
@@ -623,6 +771,8 @@ async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
             } else {
                 println!("You will need a Validator Address (Staker Address) to delegate your funds.");
             }
+        } else if choice == "O" {
+            show_overview_table(&current_accounts, cfg).await?;
         }
     }
     Ok(())
@@ -653,11 +803,23 @@ async fn process_single_account_interactive(
     // Check Staked Balance if default staker is configured
     if !cfg.default_staker_address.is_empty() {
         if let Ok(pool_addr) = network::get_pool_address(&cfg.rpc_url, &cfg.staking_contract_address, &cfg.default_staker_address).await {
-             if let Ok(staked) = network::get_staked_balance(&cfg.rpc_url, &pool_addr, &addr).await {
-                 if staked > 0.0 {
-                     println!("🥩 Staked Balance: {:.4} STRK", staked);
+             if let Ok(info) = network::get_account_pool_info(&cfg.rpc_url, &pool_addr, &addr).await {
+                 if info.staked_amount > 0.0 {
+                     println!("🥩 Staked Balance: {:.4} STRK", info.staked_amount);
                  } else {
                      println!("🥩 Staked Balance: 0.0000 STRK");
+                 }
+
+                 if info.unpool_amount > 0.0 {
+                     let now = Utc::now().timestamp() as u64;
+                     let ready_time = Utc.timestamp_opt(info.unpool_time as i64, 0).unwrap();
+                     println!("⏳ Pending Unstake: {:.4} STRK", info.unpool_amount);
+                     
+                     if info.unpool_time <= now {
+                         println!("   ✅ READY TO WITHDRAW (Use 'withdraw' command or press [X])");
+                     } else {
+                         println!("   🕒 Available at: {}", ready_time.format("%Y-%m-%d %H:%M:%S UTC"));
+                     }
                  }
              }
         }
@@ -665,8 +827,8 @@ async fn process_single_account_interactive(
     
     let deployed = network::is_account_deployed(&cfg.rpc_url, &addr).await?;
     
-    // 动态修改操作提示，增加 [E]Export [S]Stake [D]Distribute [W]Sweep
-    println!("{} [E]Export [S]Stake [D]Distribute [W]Sweep", cfg.messages.operations_label.replace(" [B]Back", ""));
+    // 动态修改操作提示，增加 [E]Export [S]Stake [D]Distribute [W]Sweep [U]Unstake [X]Withdraw
+    println!("{} [E]Export [S]Stake [D]Distribute [W]Sweep [U]Unstake [X]Withdraw", cfg.messages.operations_label.replace(" [B]Back", ""));
     print!("{}", cfg.messages.menu_choice);
     io::stdout().flush()?;
     let mut c = String::new();
@@ -900,6 +1062,76 @@ async fn process_single_account_interactive(
                     Err(e) => println!("   ❌ User Sweep Failed: {}", e),
                 }
             }
+        },
+        "U" => {
+            // 1. Resolve Staker
+            let staker_addr = if !cfg.default_staker_address.is_empty() {
+                println!("Using default staker: {}", cfg.default_staker_address);
+                cfg.default_staker_address.clone()
+            } else {
+                print!("Enter Validator (Staker) Address: ");
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                let input = input.trim();
+                if input.is_empty() { println!("❌ Validator address required."); return Ok(()); }
+                input.to_string()
+            };
+
+            // 2. Resolve Amount
+            print!("Enter Amount to Unstake (STRK): ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let unstake_amount = match input.trim().parse::<f64>() {
+                Ok(v) => v,
+                Err(_) => { println!("❌ Invalid amount."); return Ok(()); }
+            };
+
+            // 3. Resolve Pool
+            println!("🔍 Resolving Pool Address for Staker: {}...", staker_addr);
+            let pool_addr = match network::get_pool_address(&cfg.rpc_url, &cfg.staking_contract_address, &staker_addr).await {
+                Ok(p) => { println!("✅ Found Pool Contract: {}", p); p },
+                Err(e) => { println!("⚠️  Failed to resolve Pool: {}", e); return Ok(()); }
+            };
+
+            // 4. Intent
+            let pk_felt = Felt::from_hex(&account.private_key)?;
+            let tx = match network::unstake_intent(&cfg.rpc_url, &pool_addr, &addr, pk_felt, unstake_amount).await {
+                Ok(hash) => hash,
+                Err(e) => { println!("❌ Unstake Intent Failed: {:?}", e); return Ok(()); }
+            };
+            println!("🎉 Unstake Intent Sent!\nTransaction Hash: {}", tx);
+        },
+        "X" => {
+            // 1. Resolve Staker
+            let staker_addr = if !cfg.default_staker_address.is_empty() {
+                println!("Using default staker: {}", cfg.default_staker_address);
+                cfg.default_staker_address.clone()
+            } else {
+                print!("Enter Validator (Staker) Address: ");
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                let input = input.trim();
+                if input.is_empty() { println!("❌ Validator address required."); return Ok(()); }
+                input.to_string()
+            };
+
+            // 2. Resolve Pool
+            println!("🔍 Resolving Pool Address for Staker: {}...", staker_addr);
+            let pool_addr = match network::get_pool_address(&cfg.rpc_url, &cfg.staking_contract_address, &staker_addr).await {
+                Ok(p) => { println!("✅ Found Pool Contract: {}", p); p },
+                Err(e) => { println!("⚠️  Failed to resolve Pool: {}", e); return Ok(()); }
+            };
+
+            // 3. Action
+            let pk_felt = Felt::from_hex(&account.private_key)?;
+            let tx = match network::unstake_action(&cfg.rpc_url, &pool_addr, &addr, pk_felt).await {
+                Ok(hash) => hash,
+                Err(e) => { println!("❌ Withdraw Action Failed: {:?}", e); return Ok(()); }
+            };
+            println!("🎉 Withdraw Action Sent!\nTransaction Hash: {}", tx);
         },
         _ => {}
     }
