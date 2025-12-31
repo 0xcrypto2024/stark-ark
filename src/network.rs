@@ -303,20 +303,31 @@ pub async fn delegate_strk(
         calldata: vec![pool_address_felt, amount_low, amount_high],
     });
 
-    // Call 2: Enter Delegation Pool on Pool Contract
-    // enter_delegation_pool(reward_address, amount)
-    // Reward address defaults to sender
-    // NOTE: Order is important! 
-    // DEBUG: StakerPoolInfo suggests Amount is u128 (1 felt)
-    calls.push(Call {
-        to: pool_address_felt,
-        selector: get_selector_from_name("enter_delegation_pool")?,
-        calldata: vec![sender_felt, amount_low],
-    });
-
-    println!("Building Atomic Transaction...");
-    println!("   1. Approve {} STRK to Pool {}", amount, pool_contract);
-    println!("   2. Delegate {} STRK", amount);
+    // Call 2: Delegate (Enter or Add)
+    // Check if user already has a stake
+    let current_stake = get_staked_balance(rpc_url, pool_contract, sender_address).await.unwrap_or(0.0);
+    
+    if current_stake > 0.0 {
+        // Existing staker: Use add_to_delegation_pool
+        // Signature: add_to_delegation_pool(pool_member, amount)
+        println!("   -> Detecting existing stake of {} STRK. Adding to pool...", current_stake);
+        calls.push(Call {
+            to: pool_address_felt,
+            selector: get_selector_from_name("add_to_delegation_pool")?,
+            calldata: vec![sender_felt, amount_low],
+        });
+        println!("   2. Add {} STRK to Delegation Pool", amount);
+    } else {
+        // New staker: Use enter_delegation_pool
+        // enter_delegation_pool(reward_address, amount)
+        println!("   -> New staker. Entering pool...");
+        calls.push(Call {
+            to: pool_address_felt,
+            selector: get_selector_from_name("enter_delegation_pool")?,
+            calldata: vec![sender_felt, amount_low],
+        });
+        println!("   2. Enter Delegation Pool with {} STRK", amount);
+    }
 
     // 4. Send Transaction
     let result = account

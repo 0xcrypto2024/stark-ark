@@ -542,6 +542,7 @@ async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
         }
         println!("   {}", cfg.messages.menu_create_account);
         println!("   {}", cfg.messages.menu_import_account);
+        println!("   [V] View Validators");
         println!("   {}", cfg.messages.menu_quit);
         
         print!("\n{}", cfg.messages.menu_choice);
@@ -613,6 +614,15 @@ async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
                     println!("{}{}", cfg.messages.error_prefix, e);
                 }
             }
+
+        } else if choice == "V" {
+            println!("Please visit https://sepolia.voyager.online/validators to view active validators and their performance.");
+            if !cfg.default_staker_address.is_empty() {
+                println!("\n✅ Configured Default Staker: {}", cfg.default_staker_address);
+                println!("You can use this default staker for the 'stake' command, or choose a different one from the explorer.");
+            } else {
+                println!("You will need a Validator Address (Staker Address) to delegate your funds.");
+            }
         }
     }
     Ok(())
@@ -639,11 +649,24 @@ async fn process_single_account_interactive(
     
     let balance = network::get_balance(&cfg.rpc_url, &cfg.strk_contract_address, &addr).await?;
     println!("{}{:.4}", cfg.messages.balance_label, balance);
+
+    // Check Staked Balance if default staker is configured
+    if !cfg.default_staker_address.is_empty() {
+        if let Ok(pool_addr) = network::get_pool_address(&cfg.rpc_url, &cfg.staking_contract_address, &cfg.default_staker_address).await {
+             if let Ok(staked) = network::get_staked_balance(&cfg.rpc_url, &pool_addr, &addr).await {
+                 if staked > 0.0 {
+                     println!("🥩 Staked Balance: {:.4} STRK", staked);
+                 } else {
+                     println!("🥩 Staked Balance: 0.0000 STRK");
+                 }
+             }
+        }
+    }
     
     let deployed = network::is_account_deployed(&cfg.rpc_url, &addr).await?;
     
-    // 动态修改操作提示，增加 [E]Export
-    println!("{} [E]Export", cfg.messages.operations_label.replace(" [B]Back", ""));
+    // 动态修改操作提示，增加 [E]Export [S]Stake [D]Distribute [W]Sweep
+    println!("{} [E]Export [S]Stake [D]Distribute [W]Sweep", cfg.messages.operations_label.replace(" [B]Back", ""));
     print!("{}", cfg.messages.menu_choice);
     io::stdout().flush()?;
     let mut c = String::new();
@@ -704,6 +727,179 @@ async fn process_single_account_interactive(
             let json = serde_json::to_string_pretty(&export_acc)?;
             println!("{}", cfg.messages.export_result_fmt
                 .replace("{json}", &json));
+        },
+
+        "S" => {
+            // 1. Resolve Staker Address
+            let staker_addr = if !cfg.default_staker_address.is_empty() {
+                println!("Using default staker: {}", cfg.default_staker_address);
+                cfg.default_staker_address.clone()
+            } else {
+                print!("Enter Validator (Staker) Address: ");
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                let input = input.trim();
+                if input.is_empty() {
+                    println!("❌ Validator address required.");
+                    return Ok(());
+                }
+                input.to_string()
+            };
+
+            // 2. Resolve Amount
+            print!("Enter Amount to Stake (STRK): ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let stake_amount = match input.trim().parse::<f64>() {
+                Ok(v) => v,
+                Err(_) => {
+                    println!("❌ Invalid amount.");
+                    return Ok(());
+                }
+            };
+
+            // 3. Resolve Pool Address
+            println!("🔍 Resolving Pool Address for Staker: {}...", staker_addr);
+            let pool_addr = match network::get_pool_address(&cfg.rpc_url, &cfg.staking_contract_address, &staker_addr).await {
+                Ok(p) => {
+                    println!("✅ Found Pool Contract: {}", p);
+                    p
+                },
+                Err(e) => {
+                    println!("⚠️  Failed to resolve Pool Address automatically: {}", e);
+                    print!("Please enter Pool Contract Address manually (or press Enter to abort): ");
+                    io::stdout().flush()?;
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    let input = input.trim();
+                    if input.is_empty() {
+                        println!("🚫 Aborted.");
+                        return Ok(());
+                    }
+                    input.to_string()
+                }
+            };
+
+            // 4. Create Signer
+            let pk_felt = Felt::from_hex(&account.private_key)?;
+            
+            // 5. Execute Delegation
+            let tx = match network::delegate_strk(
+                &cfg.rpc_url,
+                &cfg.strk_contract_address,
+                &pool_addr,
+                &addr,
+                pk_felt,
+                stake_amount
+            ).await {
+                Ok(hash) => hash,
+                Err(e) => {
+                    println!("❌ Transaction Failed!");
+                    println!("Error Details: {:?}", e);
+                    return Ok(());
+                }
+            };
+            
+            println!("🎉 Staking Success!");
+            println!("Transaction Hash: {}", tx);
+        },
+        "D" => {
+            print!("Start Index of recipients: ");
+            io::stdout().flush()?;
+            let mut s = String::new();
+            io::stdin().read_line(&mut s)?;
+            let start: usize = match s.trim().parse() { Ok(i) => i, Err(_) => { println!("Invalid number"); return Ok(()); } };
+
+            print!("End Index of recipients: ");
+            io::stdout().flush()?;
+            let mut e = String::new();
+            io::stdin().read_line(&mut e)?;
+            let end: usize = match e.trim().parse() { Ok(i) => i, Err(_) => { println!("Invalid number"); return Ok(()); } };
+
+            print!("Amount per recipient (STRK): ");
+            io::stdout().flush()?;
+            let mut a = String::new();
+            io::stdin().read_line(&mut a)?;
+            let amt: f64 = match a.trim().parse() { Ok(f) => f, Err(_) => { println!("Invalid amount"); return Ok(()); } };
+
+            let (sender_addr, priv_felt, _) = get_account_info(&idx, all_accounts, cfg)?;
+            
+            let mut recipients = Vec::new();
+            for i in start..=end {
+                if i == idx { continue; }
+                if i >= all_accounts.len() { continue; }
+                let (addr, _, _) = get_account_info(&i, all_accounts, cfg)?;
+                recipients.push((addr, amt));
+            }
+
+            if recipients.is_empty() {
+                println!("⚠️  No valid recipients found (checked index {} to {}).", start, end);
+            } else {
+                println!("{}", cfg.messages.distribute_start);
+                match network::multi_transfer_strk(
+                    &cfg.rpc_url,
+                    &cfg.strk_contract_address,
+                    &sender_addr,
+                    priv_felt,
+                    recipients,
+                    &cfg.messages.network_building_tx
+                ).await {
+                    Ok(tx) => println!("{}{}", cfg.messages.distribute_success, tx),
+                    Err(e) => println!("❌ Distribution Failed: {}", e),
+                }
+            }
+        },
+        "W" => {
+            print!("Start Index of source accounts: ");
+            io::stdout().flush()?;
+            let mut s = String::new();
+            io::stdin().read_line(&mut s)?;
+            let start: usize = match s.trim().parse() { Ok(i) => i, Err(_) => { println!("Invalid number"); return Ok(()); } };
+
+            print!("End Index of source accounts: ");
+            io::stdout().flush()?;
+            let mut e = String::new();
+            io::stdin().read_line(&mut e)?;
+            let end: usize = match e.trim().parse() { Ok(i) => i, Err(_) => { println!("Invalid number"); return Ok(()); } };
+
+            let (to_addr, _, _) = get_account_info(&idx, all_accounts, cfg)?;
+            println!("{}", cfg.messages.sweep_start);
+
+            for i in start..=end {
+                if i == idx { continue; }
+                if i >= all_accounts.len() { continue; }
+                
+                let (from_addr, priv_felt, _) = get_account_info(&i, all_accounts, cfg)?;
+                println!("{}", cfg.messages.sweep_process_account.replace("{index}", &i.to_string()).replace("{addr}", &from_addr));
+
+                let balance = match network::get_balance(&cfg.rpc_url, &cfg.strk_contract_address, &from_addr).await {
+                    Ok(b) => b,
+                    Err(_) => { println!("   ❌ Failed to get balance"); continue; }
+                };
+
+                // Estimate fee (dummy amount for estimation)
+                let estimated_fee = match network::estimate_transfer_fee(&cfg.rpc_url, &cfg.strk_contract_address, &from_addr, priv_felt, &to_addr, 0.001).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        println!("   ❌ Fee estimation failed: {}", e);
+                        continue;
+                    }
+                };
+
+                let amount_to_send = balance - (estimated_fee * 1.2);
+
+                if amount_to_send <= 0.0 {
+                    println!("   {}", cfg.messages.sweep_skip_low_balance.replace("{balance}", &format!("{:.4}", balance)));
+                    continue;
+                }
+
+                match network::transfer_strk(&cfg.rpc_url, &cfg.strk_contract_address, &from_addr, priv_felt, &to_addr, amount_to_send, (&cfg.messages.network_building_tx, &cfg.messages.network_target_label, &cfg.messages.network_amount_label)).await {
+                    Ok(tx) => println!("   {}", cfg.messages.sweep_success.replace("{amount}", &format!("{:.4}", amount_to_send)).replace("{hash}", &tx)),
+                    Err(e) => println!("   ❌ User Sweep Failed: {}", e),
+                }
+            }
         },
         _ => {}
     }
