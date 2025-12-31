@@ -8,6 +8,8 @@ pub struct Config {
     pub keystore_file: String,
     pub strk_contract_address: String,
     pub oz_class_hash: String,
+    pub staking_contract_address: String,
+    pub default_staker_address: String,
     pub messages: Messages,
 }
 
@@ -54,9 +56,14 @@ impl Config {
             
             strk_contract_address: env::var("STRK_CONTRACT_ADDRESS")
                 .context(missing_msg.replace("{var}", "STRK_CONTRACT_ADDRESS"))?,
-            
             oz_class_hash: env::var("OZ_CLASS_HASH")
                 .context(missing_msg.replace("{var}", "OZ_CLASS_HASH"))?,
+
+            staking_contract_address: env::var("STAKING_CONTRACT_ADDRESS")
+                .context(missing_msg.replace("{var}", "STAKING_CONTRACT_ADDRESS"))?,
+
+            default_staker_address: env::var("DEFAULT_STAKER_ADDRESS")
+                .unwrap_or_default(),
             
             messages,
         })
@@ -118,6 +125,12 @@ STRK_CONTRACT_ADDRESS=0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4
 # 4. OpenZeppelin 账户合约 Class Hash (v0.8.1)
 # ⚠️ 注意：修改此值会改变派生的钱包地址！
 OZ_CLASS_HASH=0x061dac032f228abef9c6626f995015233097ae253a7f72d68552db02f2971b8f
+
+# 5. 质押合约地址 (Sepolia)
+STAKING_CONTRACT_ADDRESS=0x03745ab04a431fc02871a139be6b93d9260b0ff3e779ad9c8b377183b23109f1
+
+# 6. 默认质押节点 (可选，为空时需手动输入)
+DEFAULT_STAKER_ADDRESS=
 
 LANGUAGE=en
 "#;

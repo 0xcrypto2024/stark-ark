@@ -224,3 +224,158 @@ pub async fn estimate_transfer_fee(
     let overall_fee_u128: u128 = estimate.overall_fee.try_into().unwrap_or(0);
     Ok(overall_fee_u128 as f64 / 1_000_000_000_000_000_000.0)
 }
+
+// ==================== 获取质押池地址 ====================
+pub async fn get_pool_address(
+    rpc_url: &str,
+    staking_contract: &str,
+    staker_address: &str
+) -> Result<String> {
+    let url = Url::parse(rpc_url)?;
+    let provider = JsonRpcClient::new(HttpTransport::new(url));
+    
+    let contract_address = Felt::from_hex(staking_contract)?;
+    let staker_felt = Felt::from_hex(staker_address)?;
+    let selector = get_selector_from_name("staker_pool_info")?;
+
+    let call_request = FunctionCall {
+        contract_address,
+        entry_point_selector: selector,
+        calldata: vec![staker_felt],
+    };
+
+    let res = provider.call(call_request, BlockId::Tag(BlockTag::Latest)).await?;
+    
+    if res.len() <= 3 {
+        return Err(anyhow::anyhow!("Invalid response length from staker_pool_info"));
+    }
+
+    // Based on debug observation, the pool contract address is at index 3.
+    let pool_addr = res[3];
+    if pool_addr == Felt::ZERO {
+        return Err(anyhow::anyhow!("Staker has no active Delegation Pool (address at index 3 is 0x0). Please choose another validator."));
+    }
+
+    Ok(format!("{:#x}", pool_addr))
+}
+
+
+// ==================== 质押 (Delegate) ====================
+pub async fn delegate_strk(
+    rpc_url: &str,
+    strk_contract: &str,
+    pool_contract: &str,
+    sender_address: &str,
+    private_key: Felt,
+    amount: f64
+) -> Result<String> {
+    let url = Url::parse(rpc_url)?;
+    let provider = JsonRpcClient::new(HttpTransport::new(url));
+    let chain_id = provider.chain_id().await?;
+    let signer = LocalWallet::from(SigningKey::from_secret_scalar(private_key));
+    let sender_felt = Felt::from_hex(sender_address)?;
+
+    // 1. Initialize Account
+    let account = SingleOwnerAccount::new(
+        provider,
+        signer,
+        sender_felt,
+        chain_id,
+        ExecutionEncoding::New,
+    );
+
+    // 2. Prepare Amount (u256)
+    let amount_wei = (amount * 1_000_000_000_000_000_000.0) as u128;
+    let amount_low = Felt::from(amount_wei);
+    let amount_high = Felt::ZERO;
+
+    let pool_address_felt = Felt::from_hex(pool_contract)?;
+    let strk_address_felt = Felt::from_hex(strk_contract)?;
+
+    // 3. Construct Calls for Multicall
+    let mut calls = Vec::new();
+
+    // Call 1: Approve STRK to Pool Contract
+    // approve(spender, amount)
+    calls.push(Call {
+        to: strk_address_felt,
+        selector: get_selector_from_name("approve")?,
+        calldata: vec![pool_address_felt, amount_low, amount_high],
+    });
+
+    // Call 2: Enter Delegation Pool on Pool Contract
+    // enter_delegation_pool(reward_address, amount)
+    // Reward address defaults to sender
+    // NOTE: Order is important! 
+    // DEBUG: StakerPoolInfo suggests Amount is u128 (1 felt)
+    calls.push(Call {
+        to: pool_address_felt,
+        selector: get_selector_from_name("enter_delegation_pool")?,
+        calldata: vec![sender_felt, amount_low],
+    });
+
+    println!("Building Atomic Transaction...");
+    println!("   1. Approve {} STRK to Pool {}", amount, pool_contract);
+    println!("   2. Delegate {} STRK", amount);
+
+    // 4. Send Transaction
+    let result = account
+        .execute_v3(calls)
+        .send()
+        .await?;
+
+    Ok(format!("{:#x}", result.transaction_hash))
+}
+
+// ==================== 查询质押余额 ====================
+pub async fn get_staked_balance(
+    rpc_url: &str,
+    pool_contract: &str,
+    user_address: &str
+) -> Result<f64> {
+    let url = Url::parse(rpc_url)?;
+    let provider = JsonRpcClient::new(HttpTransport::new(url));
+
+    let contract_address = Felt::from_hex(pool_contract)?;
+    let user_felt = Felt::from_hex(user_address)?;
+    
+    // Correct selector for Delegation Pool (v1)
+    let selector = get_selector_from_name("get_pool_member_info_v1")?;
+
+    let call_request = FunctionCall {
+        contract_address,
+        entry_point_selector: selector,
+        calldata: vec![user_felt],
+    };
+
+    match provider.call(call_request, BlockId::Tag(BlockTag::Latest)).await {
+        Ok(res) => {
+            // PoolMemberInfo struct typical layout:
+            // {
+            //   amount: Amount (u128),     <- Index 0
+            //   reward_address: Address,   <- Index 1
+            //   ...
+            // }
+            // Debugging to be sure
+            // Debug logging to be sure
+            // println!("🔍 Debug: get_pool_member_info raw response: {:?}", res);
+            
+            // Debug confirms:
+            // Index 0: 0x0
+            // Index 1: Reward Address (User)
+            // Index 2: Amount (1.0 STRK) => 0xde0b6b3a7640000
+            
+            if res.len() > 2 {
+                let amount_felt = res[2];
+                let balance_u128: u128 = match amount_felt.try_into() { Ok(val) => val, Err(_) => 0 };
+                Ok(balance_u128 as f64 / 1_000_000_000_000_000_000.0)
+            } else {
+                Ok(0.0)
+            }
+        },
+        Err(e) => {
+            println!("Debug: Failed to get staked balance: {:?}", e);
+            Ok(0.0)
+        }
+    }
+}

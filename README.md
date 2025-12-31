@@ -116,6 +116,31 @@ Export the private key or full account configuration (JSON) for backup.
 stark-ark export --index 0
 ```
 
+#### 8. View Validators
+View a link to active validators or check your configured default staker.
+
+```bash
+stark-ark validators
+```
+
+#### 9. Stake Funds
+Delegate STRK tokens to a validator to earn rewards.
+
+```bash
+# Interactive mode (prompts for amount and validator)
+stark-ark stake --index 0
+
+# Non-interactive mode
+stark-ark stake --index 0 --amount 10 --validator 0x123...
+```
+
+#### 10. Check Balance (Wallet + Staked)
+View both your wallet balance and your delegated (staked) amount.
+
+```bash
+stark-ark balance --index 0
+```
+
 ## License
 
 MIT
