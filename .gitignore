@@ -32,4 +32,8 @@ Thumbs.db
 # Vim / Emacs
 *.swp
 *~
+*~
 token_cache.json
+*.rs.bk
+*.txt
+*.crate
