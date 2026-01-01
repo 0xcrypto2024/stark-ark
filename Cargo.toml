@@ -9,6 +9,8 @@ exclude = [
     ".env",
     ".env.sample",
     "keystore.json",
+    "/target",
+    "**/*.rs.bk"
 ]
 
 [dependencies]
