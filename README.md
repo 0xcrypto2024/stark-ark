@@ -141,6 +141,39 @@ View both your wallet balance and your delegated (staked) amount.
 stark-ark balance --index 0
 ```
 
+#### 11. Backup & Restore (Google Drive)
+☁️  Securely backup your encrypted keystore to Google Drive.
+
+**Prerequisites**:
+You must configure your Google Cloud credentials in `.env` (see Configuration below).
+
+```bash
+# Upload keystore to Google Drive
+stark-ark backup
+
+# Restore keystore from Google Drive
+stark-ark restore
+```
+
+## Google Drive Configuration
+
+To use the backup feature, you need to provide your own Google Cloud "OAuth 2.0 Client ID" credentials.
+
+1.  Go to **[Google Cloud Console](https://console.cloud.google.com/)**.
+2.  Create a Project (e.g., "StarkArk Backup").
+3.  Enable **Google Drive API** (API & Services > Library).
+4.  Go to **API & Services > Credentials**.
+5.  Click **Create Credentials** > **OAuth client ID**.
+6.  Application Type: **Desktop app**.
+7.  Copy the **Client ID** and **Client Secret**.
+8.  **Important**: Go to **OAuth consent screen** > **Test users** and click **Add Users**. Add your own email address (e.g., `zhaojimmy13@gmail.com`). This is required because the app is in "Testing" mode.
+9.  Add the credentials to your `.env` file:
+
+```dotenv
+GOOGLE_CLIENT_ID=your_client_id_here
+GOOGLE_CLIENT_SECRET=your_client_secret_here
+```
+
 ## License
 
 MIT

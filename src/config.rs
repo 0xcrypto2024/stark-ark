@@ -11,6 +11,8 @@ pub struct Config {
     pub staking_contract_address: String,
     pub default_staker_address: String,
     pub messages: Messages,
+    pub google_client_id: Option<String>,
+    pub google_client_secret: Option<String>,
 }
 
 impl Config {
@@ -18,6 +20,12 @@ impl Config {
     pub fn load() -> Result<Self> {
         // 加载 .env 文件
         // 1. 尝试从当前工作目录加载
+        if let Ok(current_dir) = env::current_dir() {
+            let env_path = current_dir.join(".env");
+            if env_path.exists() {
+                from_path(env_path).ok();
+            }
+        }
         dotenv().ok();
 
         // 2. 尝试从可执行文件所在目录加载 (解决在其他目录运行 binary 时找不到 .env 的问题)
@@ -66,6 +74,9 @@ impl Config {
                 .unwrap_or_default(),
             
             messages,
+            
+            google_client_id: env::var("GOOGLE_CLIENT_ID").ok(),
+            google_client_secret: env::var("GOOGLE_CLIENT_SECRET").ok(),
         })
     }
 

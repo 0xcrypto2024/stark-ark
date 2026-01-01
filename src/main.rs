@@ -5,6 +5,7 @@ use stark_ark::keystore::{Keystore, AccountConfig};
 use stark_ark::config::Config;
 use stark_ark::network;
 use stark_ark::i18n;
+use stark_ark::backup::GoogleDriveBackend;
 use anyhow::Result;
 use std::path::Path;
 use std::io::{self, Write};
@@ -138,6 +139,10 @@ enum Commands {
     },
     /// 📊 Overview of all accounts
     Overview,
+    /// ☁️  Backup keystore to Google Drive
+    Backup,
+    /// ☁️  Restore keystore from Google Drive
+    Restore,
 }
 
 #[derive(Subcommand)]
@@ -207,8 +212,9 @@ async fn main() -> Result<()> {
         cfg.keystore_file = path;
     }
 
-    // 如果没有 keystore，先初始化
-    if !Path::new(&cfg.keystore_file).exists() {
+    // 如果没有 keystore且不是 Restore 命令，先初始化
+    let is_restore = matches!(cli.command, Some(Commands::Restore));
+    if !is_restore && !Path::new(&cfg.keystore_file).exists() {
         println!("{}", cfg.messages.wallet_not_found);
         initialize_new_wallet(&cfg.keystore_file, &cfg.messages)?;
     }
@@ -216,7 +222,7 @@ async fn main() -> Result<()> {
     // 根据是否有参数决定运行模式
     match &cli.command {
         Some(cmd) => run_cli_mode(cmd, &cfg).await?,
-        None => run_interactive_mode_real(&cfg).await?,
+        None => run_interactive_mode_real(&mut cfg).await?,
     }
 
     Ok(())
@@ -302,6 +308,55 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
             } else {
                 println!("You will need a Validator Address (Staker Address) to delegate your funds.");
             }
+            return Ok(());
+        },
+        Commands::Restore => {
+            println!("☁️  Starting Google Drive Restore...");
+            let client_id = cfg.google_client_id.as_deref().ok_or_else(|| anyhow::anyhow!("Missing GOOGLE_CLIENT_ID in .env"))?.to_string();
+            let client_secret = cfg.google_client_secret.as_deref().ok_or_else(|| anyhow::anyhow!("Missing GOOGLE_CLIENT_SECRET in .env"))?.to_string();
+
+            let backend = GoogleDriveBackend::new(client_id, client_secret).await?;
+            println!("🔐 Authenticated. Fetching backups...");
+
+            let backups = backend.list_backups().await?;
+            if backups.is_empty() {
+                println!("⚠️  No 'keystore' backups found in Google Drive.");
+                return Ok(());
+            }
+
+            println!("📋 Available Backups:");
+            for (i, (_id, name, time)) in backups.iter().enumerate() {
+                println!("   [{}] {} (Created: {})", i, name, time);
+            }
+
+            print!("👉 Select backup to restore (index): ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let index = input.trim().parse::<usize>()?;
+
+            if index >= backups.len() {
+                println!("❌ Invalid index.");
+                return Ok(());
+            }
+
+            let (file_id, name, _) = &backups[index];
+            println!("📥 Downloading '{}'...", name);
+            
+            let target_path = Path::new(&cfg.keystore_file);
+            if target_path.exists() {
+                 print!("⚠️  Local keystore exists. Overwrite? [y/N]: ");
+                 io::stdout().flush()?;
+                 let mut confirm = String::new();
+                 io::stdin().read_line(&mut confirm)?;
+                 if confirm.trim().to_lowercase() != "y" {
+                     println!("🚫 Aborted.");
+                     return Ok(());
+                 }
+            }
+
+            backend.download_file(file_id, target_path).await?;
+            println!("✅ Restore successful! Saved to: {:?}", target_path);
             return Ok(());
         },
         _ => {}
@@ -637,6 +692,23 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
             };
              println!("🎉 Withdraw Action Sent!\nTransaction Hash: {}", tx);
         },
+        Commands::Backup => {
+            println!("☁️  Starting Google Drive Backup...");
+            let client_id = cfg.google_client_id.as_deref().ok_or_else(|| anyhow::anyhow!("Missing GOOGLE_CLIENT_ID in .env"))?.to_string();
+            let client_secret = cfg.google_client_secret.as_deref().ok_or_else(|| anyhow::anyhow!("Missing GOOGLE_CLIENT_SECRET in .env"))?.to_string();
+
+            let backend = GoogleDriveBackend::new(client_id, client_secret).await?;
+            println!("🔐 Authenticated.");
+            
+            let path = Path::new(&cfg.keystore_file);
+            if !path.exists() {
+                 return Err(anyhow::anyhow!("Keystore file not found: {:?}", path));
+            }
+            
+            let file_id = backend.upload_file(path).await?;
+            println!("✅ Backup successful! File ID: {}", file_id);
+        },
+
         _ => {}
     }
     Ok(())
@@ -668,7 +740,7 @@ fn validate_target_address(addr: &str, msgs: &i18n::Messages) -> Result<()> {
 
 // ==================== 交互模式逻辑 ====================
 
-async fn run_interactive_mode_real(cfg: &Config) -> Result<()> {
+async fn run_interactive_mode_real(cfg: &mut Config) -> Result<()> {
     println!("{}", cfg.messages.interactive_welcome);
     println!("===================================");
     
@@ -783,7 +855,7 @@ async fn process_single_account_interactive(
     account: &AccountConfig, 
     idx: usize, 
     all_accounts: &[AccountConfig],
-    cfg: &Config
+    cfg: &mut Config
 ) -> Result<()> {
     let addr = Keystore::compute_address(account, &cfg.oz_class_hash)?;
     println!("\n{}", cfg.messages.account_details_title.replace("{index}", &idx.to_string()));
@@ -966,6 +1038,12 @@ async fn process_single_account_interactive(
             
             println!("🎉 Staking Success!");
             println!("Transaction Hash: {}", tx);
+
+            if cfg.default_staker_address.is_empty() {
+                cfg.default_staker_address = staker_addr.clone();
+                println!("\n✅ Configured '{}' as temporary default staker for this session.", staker_addr);
+                println!("   (To make this permanent, add DEFAULT_STAKER_ADDRESS={} to your .env file)", staker_addr);
+            }
         },
         "D" => {
             print!("Start Index of recipients: ");
