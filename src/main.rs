@@ -1,19 +1,22 @@
 use comfy_table::{Table, presets::UTF8_FULL, Cell, Color, Attribute}; // Added comfy_table
 use clap::{Parser, Subcommand};
-use rpassword;
 use stark_ark::keystore::{Keystore, AccountConfig};
 use stark_ark::config::Config;
 use stark_ark::network;
 use stark_ark::i18n;
 use stark_ark::backup::GoogleDriveBackend;
+use stark_ark::ui;
 use anyhow::Result;
 use std::path::Path;
 use std::io::{self, Write};
 use chrono::{Utc, TimeZone}; // Added chrono
 use starknet::core::types::Felt;
+use serde_json::json;
 use starknet::signers::SigningKey;
 use qrcode::QrCode;
 use qrcode::render::unicode;
+use inquire::{Text, Password, Select};
+use std::env;
 
 // ==================== CLI 定义 ====================
 
@@ -24,6 +27,10 @@ struct Cli {
     /// Specify keystore file path
     #[arg(short, long, global = true)]
     keystore: Option<String>,
+
+    /// Output JSON instead of human-readable text
+    #[arg(long, global = true)]
+    json: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -208,6 +215,10 @@ async fn main() -> Result<()> {
 
     let mut cfg = Config::load()?;
 
+    // 1. 初始化 UI 模式
+    ui::set_json_mode(cli.json);
+    ui::print_banner();
+
     if let Some(path) = cli.keystore {
         cfg.keystore_file = path;
     }
@@ -391,7 +402,20 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
         },
         Commands::Balance { index } => {
             let (addr, _, _) = get_account_info(index, &accounts, cfg)?;
-            let balance = network::get_balance(&cfg.rpc_url, &cfg.strk_contract_address, &addr).await?;
+            
+            // AI/Human: Fetching data
+            let balance = ui::with_spinner(&format!("Fetching balance for account {}...", index), network::get_balance(&cfg.rpc_url, &cfg.strk_contract_address, &addr)).await?;
+            
+            if ui::is_json_mode() {
+                 ui::print_json_obj(&json!({
+                    "index": index,
+                    "address": addr,
+                    "balance": balance,
+                    "unit": "STRK"
+                 }));
+                 return Ok(());
+            }
+
             let msg = cfg.messages.balance_fmt
                 .replace("{index}", &index.to_string())
                 .replace("{balance}", &format!("{:.4}", balance));
@@ -428,9 +452,23 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
         },
         Commands::Deploy { index } => {
             let (addr, priv_felt, pub_felt) = get_account_info(index, &accounts, cfg)?;
-            println!("{}{}", cfg.messages.activating_account, addr);
-            let tx = network::deploy_account(&cfg.rpc_url, &cfg.oz_class_hash, priv_felt, pub_felt, &cfg.messages.network_deploying).await?;
-            println!("{}{}", cfg.messages.tx_sent, tx);
+            
+            if !ui::is_json_mode() {
+                 println!("{}{}", cfg.messages.activating_account, addr);
+            }
+            
+            let tx = ui::with_spinner("Deploying Account...", network::deploy_account(&cfg.rpc_url, &cfg.oz_class_hash, priv_felt, pub_felt, &cfg.messages.network_deploying)).await?;
+            
+            if ui::is_json_mode() {
+                ui::print_json_obj(&json!({
+                    "status": "success",
+                    "operation": "deploy",
+                    "address": addr,
+                    "tx_hash": tx
+                }));
+            } else {
+                ui::print_success(&format!("{}{}", cfg.messages.tx_sent, tx));
+            }
         },
         Commands::Transfer { from_index, to, amount } => {
             validate_target_address(to, &cfg.messages)?;
@@ -439,9 +477,23 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
                 .replace("{amount}", &amount.to_string())
                 .replace("{to}", to);
             
-            println!("{}", msg);
-            let tx = network::transfer_strk(&cfg.rpc_url, &cfg.strk_contract_address, &addr, priv_felt, to, *amount, (&cfg.messages.network_building_tx, &cfg.messages.network_target_label, &cfg.messages.network_amount_label)).await?;
-            println!("{}{}", cfg.messages.tx_sent, tx);
+            if !ui::is_json_mode() {
+                println!("{}", msg);
+            }
+            
+            let tx = ui::with_spinner("Sending Transaction...", network::transfer_strk(&cfg.rpc_url, &cfg.strk_contract_address, &addr, priv_felt, to, *amount, (&cfg.messages.network_building_tx, &cfg.messages.network_target_label, &cfg.messages.network_amount_label))).await?;
+            if ui::is_json_mode() {
+                ui::print_json_obj(&json!({
+                     "status": "success",
+                     "operation": "transfer",
+                     "from": addr,
+                     "to": to,
+                     "amount": amount,
+                     "tx_hash": tx
+                }));
+            } else {
+                ui::print_success(&format!("{}{}", cfg.messages.tx_sent, tx));
+            }
         },
         Commands::Overview => {
             show_overview_table(&accounts, cfg).await?;
@@ -510,9 +562,9 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
             let input = match key {
                 Some(k) => k.clone(),
                 None => {
-                    print!("{}", cfg.messages.import_enter_key);
-                    io::stdout().flush()?;
-                    prompt_password()?
+                    // print!("{}", cfg.messages.import_enter_key);
+                    // io::stdout().flush()?;
+                    prompt_password(&cfg.messages.import_enter_key)?
                 }
             };
             
@@ -753,98 +805,108 @@ async fn run_interactive_mode_real(cfg: &mut Config) -> Result<()> {
     let pass = password; 
 
     loop {
-        println!("\n{}", cfg.messages.account_list);
-        for (i, acc) in current_accounts.iter().enumerate() {
-            let addr = Keystore::compute_address(acc, &cfg.oz_class_hash)?;
-            let alias_suffix = acc.alias.as_ref().map(|a| format!(" ({})", a)).unwrap_or_default();
-            println!("   [{}] {}{}", i, addr, alias_suffix);
-        }
-        println!("   {}", cfg.messages.menu_create_account);
-        println!("   {}", cfg.messages.menu_import_account);
-        println!("   [V] View Validators");
-        println!("   [O] 📊 Overview (All Accounts)");
-        println!("   {}", cfg.messages.menu_quit);
+        // Clear screen or just print separator? Let's just print separator for now.
+        println!("\n===================================");
         
-        print!("\n{}", cfg.messages.menu_choice);
-        io::stdout().flush()?;
-        let mut choice = String::new();
-        io::stdin().read_line(&mut choice)?;
-        let choice = choice.trim().to_uppercase();
+        // Show account summary briefly? 
+        // Or just the menu.
+        
+        let mut options = vec![
+            "📋 List Accounts",
+            "✨ Create New Account",
+            "📥 Import Account",
+            "🔍 View Validators",
+            "📊 Overview (All Accounts)",
+            "❌ Quit",
+        ];
 
-        if choice == "Q" {
-            break;
-        } else if choice == "N" {
-            println!("{}", cfg.messages.generating_new_account);
-            let new_account = AccountConfig {
-                private_key: Keystore::generate_new_key(),
-                salt: None,
-                class_hash: Some(cfg.oz_class_hash.clone()),
-                alias: None,
-                address: None,
-            };
-            
-            let updated = Keystore::add_account(&keystore_obj, &pass, new_account)?;
-            save_keystore(&cfg.keystore_file, &updated)?;
-            // 更新内存状态
-            keystore_obj = updated;
-            current_accounts = keystore_obj.decrypt(&pass)?; 
-            println!("{}", cfg.messages.new_account_created);
-        } else if choice == "I" {
-            print!("{}", cfg.messages.import_enter_key);
-            io::stdout().flush()?;
-            let input = prompt_password()?;
-            let input = input.trim();
-            
-            let account_config = if input.starts_with('{') {
-                 match serde_json::from_str::<AccountConfig>(input) {
-                    Ok(ac) => ac,
-                    Err(_) => {
-                        println!("❌ Invalid JSON");
-                        continue;
-                    }
+        let choice = Select::new(&cfg.messages.menu_choice, options.clone())
+            .with_page_size(10)
+            .prompt()?;
+
+        match choice {
+            "❌ Quit" => break,
+            "📋 List Accounts" => {
+                 println!("{}", cfg.messages.account_list);
+                 for (i, acc) in current_accounts.iter().enumerate() {
+                    let addr = Keystore::compute_address(acc, &cfg.oz_class_hash)?;
+                    let alias_suffix = acc.alias.as_ref().map(|a| format!(" ({})", a)).unwrap_or_default();
+                    println!("   [{}] {}{}", i, addr, alias_suffix);
                  }
-            } else {
-                if Felt::from_hex(input).is_err() {
-                     println!("{}", cfg.messages.import_invalid_key);
-                     continue;
-                }
-                AccountConfig {
-                    private_key: input.to_string(),
+                 
+                 // Offer to select an account?
+                 let mut account_options = current_accounts.iter().enumerate().map(|(i, acc)| {
+                     let addr = Keystore::compute_address(acc, &cfg.oz_class_hash).unwrap_or_default();
+                     let short = if addr.len() > 10 { format!("{}...", &addr[..10]) } else { addr };
+                     format!("[{}] {}", i, short)
+                 }).collect::<Vec<_>>();
+                 account_options.push("🔙 Back".to_string());
+
+                 if let Ok(acc_choice) = Select::new("Select an account to manage:", account_options).prompt() {
+                     if acc_choice != "🔙 Back" {
+                         let idx = acc_choice[1..].split(']').next().unwrap().parse::<usize>().unwrap();
+                         if let Err(e) = process_single_account_interactive(&current_accounts[idx], idx, &current_accounts, cfg).await {
+                             println!("{}{}", cfg.messages.error_prefix, e);
+                         }
+                     }
+                 }
+            },
+            "✨ Create New Account" => {
+                println!("{}", cfg.messages.generating_new_account);
+                let new_account = AccountConfig {
+                    private_key: Keystore::generate_new_key(),
                     salt: None,
                     class_hash: Some(cfg.oz_class_hash.clone()),
                     alias: None,
                     address: None,
+                };
+                
+                let updated = Keystore::add_account(&keystore_obj, &pass, new_account)?;
+                save_keystore(&cfg.keystore_file, &updated)?;
+                keystore_obj = updated;
+                current_accounts = keystore_obj.decrypt(&pass)?; 
+                println!("{}", cfg.messages.new_account_created);
+            },
+            "📥 Import Account" => {
+                let input = prompt_password(&cfg.messages.import_enter_key)?;
+                let input = input.trim();
+                
+                let account_config = if input.starts_with('{') {
+                     match serde_json::from_str::<AccountConfig>(input) {
+                        Ok(ac) => ac,
+                        Err(_) => { println!("❌ Invalid JSON"); continue; }
+                     }
+                } else {
+                    if Felt::from_hex(input).is_err() {
+                         println!("{}", cfg.messages.import_invalid_key);
+                         continue;
+                    }
+                    AccountConfig {
+                        private_key: input.to_string(),
+                        salt: None,
+                        class_hash: Some(cfg.oz_class_hash.clone()),
+                        alias: None,
+                        address: None,
+                    }
+                };
+    
+                match Keystore::add_account(&keystore_obj, &pass, account_config) {
+                    Ok(updated) => {
+                        save_keystore(&cfg.keystore_file, &updated)?;
+                        keystore_obj = updated;
+                        current_accounts = keystore_obj.decrypt(&pass)?;
+                        println!("{}", cfg.messages.import_success);
+                    },
+                    Err(_) => println!("{}", cfg.messages.import_exists),
                 }
-            };
-
-            match Keystore::add_account(&keystore_obj, &pass, account_config) {
-                Ok(updated) => {
-                    save_keystore(&cfg.keystore_file, &updated)?;
-                    keystore_obj = updated;
-                    current_accounts = keystore_obj.decrypt(&pass)?;
-                    println!("{}", cfg.messages.import_success);
-                    println!("{}", cfg.messages.import_derivation_warning);
-                },
-                Err(_) => println!("{}", cfg.messages.import_exists),
-            }
-        } else if let Ok(index) = choice.parse::<usize>() {
-            if index < current_accounts.len() {
-                // 进入单账户操作
-                if let Err(e) = process_single_account_interactive(&current_accounts[index], index, &current_accounts, cfg).await {
-                    println!("{}{}", cfg.messages.error_prefix, e);
-                }
-            }
-
-        } else if choice == "V" {
-            println!("Please visit https://sepolia.voyager.online/validators to view active validators and their performance.");
-            if !cfg.default_staker_address.is_empty() {
-                println!("\n✅ Configured Default Staker: {}", cfg.default_staker_address);
-                println!("You can use this default staker for the 'stake' command, or choose a different one from the explorer.");
-            } else {
-                println!("You will need a Validator Address (Staker Address) to delegate your funds.");
-            }
-        } else if choice == "O" {
-            show_overview_table(&current_accounts, cfg).await?;
+            },
+            "🔍 View Validators" => {
+                println!("Please visit https://sepolia.voyager.online/validators to view active validators.");
+            },
+            "📊 Overview (All Accounts)" => {
+                show_overview_table(&current_accounts, cfg).await?;
+            },
+            _ => {}
         }
     }
     Ok(())
@@ -1219,10 +1281,10 @@ async fn process_single_account_interactive(
 // ==================== 通用辅助函数 ====================
 
 /// 加载并解密，返回 (Keystore对象, 私钥列表, 密码字符串)
+/// 加载并解密，返回 (Keystore对象, 私钥列表, 密码字符串)
 fn load_and_decrypt(filepath: &str, msgs: &i18n::Messages) -> Result<(Keystore, Vec<AccountConfig>, String)> {
-    print!("{}", msgs.enter_password);
-    io::stdout().flush()?;
-    let password = prompt_password()?;
+    // 智能获取密码 (Env Var -> Prompt)
+    let password = prompt_password(&msgs.enter_password)?;
 
     let content = std::fs::read_to_string(filepath)?;
     let keystore: Keystore = serde_json::from_str(&content)?;
@@ -1233,8 +1295,23 @@ fn load_and_decrypt(filepath: &str, msgs: &i18n::Messages) -> Result<(Keystore, 
     Ok((keystore, keys, password))
 }
 
-fn prompt_password() -> Result<String> {
-    Ok(rpassword::read_password()?.trim().to_string())
+fn prompt_password(prompt: &str) -> Result<String> {
+    // 1. Check Environment Variable (Secure & AI Friendly)
+    if let Ok(p) = env::var("STARK_ARK_PASSWORD") {
+        if !p.trim().is_empty() {
+             return Ok(p.trim().to_string());
+        }
+    }
+
+    // 2. Check Non-Interactive Mode
+    if ui::is_json_mode() {
+        return Err(anyhow::anyhow!("Password required! Set STARK_ARK_PASSWORD env var for non-interactive mode."));
+    }
+
+    // 3. Interactive Prompt
+    Ok(Password::new(prompt)
+        .without_confirmation()
+        .prompt()?)
 }
 
 fn prepare_export_account(acc: &AccountConfig, cfg: &Config) -> Result<AccountConfig> {
@@ -1270,9 +1347,9 @@ fn save_keystore(filepath: &str, keystore: &Keystore) -> Result<()> {
 
 fn initialize_new_wallet(filename: &str, msgs: &i18n::Messages) -> Result<()> {
     println!("{}", msgs.init_new_wallet);
-    print!("{}", msgs.set_password);
-    io::stdout().flush()?;
-    let password = prompt_password()?;
+    // print!("{}", msgs.set_password);
+    // io::stdout().flush()?;
+    let password = prompt_password(&msgs.set_password)?;
     
     // 初始化时创建一个默认账户，不指定 Class Hash (使用运行时默认)
     let first_account = AccountConfig {

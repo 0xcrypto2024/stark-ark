@@ -4,10 +4,10 @@ A secure, Rust-based CLI wallet and library for Starknet.
 
 ## Features
 
+- 🤖 **AI-First Design**: Native JSON output (`--json`) and secure non-interactive mode for autonomous agents.
+- 🦁 **Degen UX**: High-speed TUI with arrow-key menus, ASCII banners, and live spinners for humans.
 - 🛡️ **Secure Keystore**: Encrypted local storage for private keys using AES-256-GCM and Argon2.
 - ⚡ **Starknet Integration**: Native support for Starknet accounts (OpenZeppelin), transfers, and deployments.
-- 🖥️ **Interactive & CLI Modes**: Use it as a command-line tool or via an interactive menu.
-- 🌍 **Multi-language Support**: Supports English and Chinese (configurable via `.env`).
 - 📦 **Library Support**: Can be used as a Rust crate in other projects.
 
 ## Installation
@@ -47,13 +47,40 @@ Before using StarkArk, you need to configure the RPC endpoint and other settings
     stark-ark config show
     ```
 
+
+## 🤖 AI & Automation Guide
+
+StarkArk is built to be the best Starknet wallet for AI Agents.
+
+### 1. Enable Machine Output
+Use the `--json` flag to get strict, structured JSON output for parsing.
+
+```bash
+stark-ark --json balance --index 0
+# Output: {"index":0,"address":"0x...","balance":100.0,"unit":"STRK"}
+```
+
+### 2. Secure Non-Interactive Authentication
+To run commands without user interaction (prompts), set the `STARK_ARK_PASSWORD` environment variable.
+
+```bash
+export STARK_ARK_PASSWORD="my_strong_password"
+stark-ark --json transfer --from-index 0 --to 0x123... --amount 1.0
+```
+
+> **Note**: If you run in `--json` mode without the environment variable, the command will fail immediately rather than hang, preventing zombie processes.
+
 ## Usage
 
 StarkArk can be used in **Interactive Mode** (by running without arguments) or **CLI Mode**.
 
-### Interactive Mode
+### Interactive Mode (Degen UX)
 
-Simply run:
+Run `stark-ark` without arguments to enter the TUI mode. 
+
+- **Arrow Keys ⬆️ ⬇️**: Navigate menus.
+- **Enter ↵**: Select options.
+- **Real-time Spinners**: Watch network operations in style.
 
 ```bash
 stark-ark

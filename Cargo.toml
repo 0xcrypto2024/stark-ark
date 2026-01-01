@@ -40,6 +40,9 @@ directories = "6.0.0"
 qrcode = "0.14.1"
 chrono = "0.4.42"
 comfy-table = "7.2.1"
+colored = "2.0"
+indicatif = "0.17"
+inquire = "0.7"
 
 # Google Drive Backup
 google-drive3 = "5.0"
