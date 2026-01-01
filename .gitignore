@@ -12,9 +12,6 @@
 
 # 钱包数据 (包含加密后的私钥)
 keystore.json
-token_cache.json # Google Drive 认证 Token 缓存
-*.json  # 如果你有其他钱包备份，建议忽略所有 json 或指定文件名
-
 # ========================
 # 💻 操作系统生成文件
 # ========================
@@ -35,3 +32,4 @@ Thumbs.db
 # Vim / Emacs
 *.swp
 *~
+token_cache.json
