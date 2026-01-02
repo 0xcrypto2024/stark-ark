@@ -15,8 +15,11 @@ use serde_json::json;
 use starknet::signers::SigningKey;
 use qrcode::QrCode;
 use qrcode::render::unicode;
-use inquire::{Text, Password, Select};
+use inquire::{Password, Select};
 use std::env;
+use stark_ark::avnu::{AvnuClient, AvnuNetwork, Token};
+
+use starknet::providers::Provider;
 
 // ==================== CLI 定义 ====================
 
@@ -150,6 +153,26 @@ enum Commands {
     Backup,
     /// ☁️  Restore keystore from Google Drive
     Restore,
+    /// 💱 Swap Tokens (AVNU)
+    Swap {
+        /// Sell Token Address
+        #[arg(short, long)]
+        sell: String,
+        /// Buy Token Address
+        #[arg(short, long)]
+        buy: String,
+        /// Amount to Sell
+        #[arg(short, long)]
+        amount: f64,
+        /// Max Slippage (default 0.005)
+        #[arg(long, default_value = "0.005")]
+        slippage: f64,
+        /// Account index
+        #[arg(long)]
+        index: usize,
+    },
+    /// 🪙 List Supported Tokens (AVNU)
+    Tokens,
 }
 
 #[derive(Subcommand)]
@@ -311,6 +334,28 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
     // 0. 处理不需要钱包解锁的命令
     match cmd {
         Commands::Config { .. } | Commands::Version => { return Ok(()); },
+        Commands::Tokens => {
+            let network = if cfg.rpc_url.contains("sepolia") { AvnuNetwork::Sepolia } else { AvnuNetwork::Mainnet };
+            let client = AvnuClient::new(network);
+            println!("Fetching tokens from AVNU ({:?})...", network);
+            match client.get_tokens().await {
+                Ok(tokens) => {
+                     let mut table = Table::new();
+                    table.load_preset(UTF8_FULL).set_header(vec!["Symbol", "Name", "Address", "Decimals"]);
+                    for t in tokens {
+                        table.add_row(vec![
+                            t.symbol,
+                            t.name,
+                            t.address,
+                            t.decimals.to_string()
+                        ]);
+                    }
+                    println!("{table}");
+                },
+                Err(e) => println!("Error fetching tokens: {}", e),
+            }
+            return Ok(());
+        },
         Commands::Validators => {
             println!("Please visit https://sepolia.voyager.online/validators to view active validators and their performance.");
             if !cfg.default_staker_address.is_empty() {
@@ -761,6 +806,59 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
             println!("✅ Backup successful! File ID: {}", file_id);
         },
 
+        Commands::Swap { sell, buy, amount, slippage, index } => {
+            let network = if cfg.rpc_url.contains("sepolia") { AvnuNetwork::Sepolia } else { AvnuNetwork::Mainnet };
+            let client = AvnuClient::new(network);
+            
+            // 1. Get Quote
+            println!("Fetching quote from AVNU...");
+            let tokens = client.get_tokens().await?;
+            let sell_token_info = tokens.iter().find(|t| t.address == *sell || t.symbol.eq_ignore_ascii_case(sell)).ok_or(anyhow::anyhow!("Sell token not found (check 'tokens' command)"))?;
+            let buy_token_info = tokens.iter().find(|t| t.address == *buy || t.symbol.eq_ignore_ascii_case(buy)).ok_or(anyhow::anyhow!("Buy token not found (check 'tokens' command)"))?;
+            
+            let amount_wei = (*amount * 10f64.powi(sell_token_info.decimals as i32)).floor();
+            let amount_str = format!("{:#x}", amount_wei as u128);
+            
+            let quote = client.get_quote(&sell_token_info.address, &buy_token_info.address, &amount_str).await?;
+            
+            let buy_amount_val = u128::from_str_radix(quote.buy_amount.trim_start_matches("0x"), 16)?;
+            let buy_amount_float = buy_amount_val as f64 / 10f64.powi(buy_token_info.decimals as i32);
+            
+            println!("--------------------------------");
+            println!("💱 Swap Quote:");
+            println!("Sell: {} {}", amount, sell_token_info.symbol);
+            println!("Buy:  {:.6} {}", buy_amount_float, buy_token_info.symbol);
+            println!("Price: 1 {} ≈ {:.6} {}", sell_token_info.symbol, buy_amount_float/amount, buy_token_info.symbol);
+            // println!("Slippage: {:.2}%", slippage * 100.0);
+            println!("--------------------------------");
+            
+            // 2. Build Transaction
+            let (addr, priv_felt, _) = get_account_info(index, &accounts, cfg)?;
+            let calls = client.build_swap(&quote.quote_id, &addr, *slippage, &sell_token_info.address, &amount_str).await?;
+            
+            use starknet::providers::{jsonrpc::HttpTransport, JsonRpcClient};
+            use starknet::accounts::{SingleOwnerAccount, ExecutionEncoding, Account};
+            use starknet::signers::LocalWallet;
+            use url::Url;
+            
+            let url = Url::parse(&cfg.rpc_url)?;
+            let provider = JsonRpcClient::new(HttpTransport::new(url));
+            let chain_id = provider.chain_id().await?;
+            let signer = LocalWallet::from(SigningKey::from_secret_scalar(priv_felt));
+            let sender_felt = Felt::from_hex(&addr)?;
+            
+            let account_obj = SingleOwnerAccount::new(
+                provider,
+                signer,
+                sender_felt,
+                chain_id,
+                ExecutionEncoding::New,
+            );
+            
+            let tx_result = ui::with_spinner("Swapping...", account_obj.execute_v3(calls).send()).await?;
+            println!("✅ Swap Transaction Sent: {:#x}", tx_result.transaction_hash);
+        },
+
         _ => {}
     }
     Ok(())
@@ -811,12 +909,14 @@ async fn run_interactive_mode_real(cfg: &mut Config) -> Result<()> {
         // Show account summary briefly? 
         // Or just the menu.
         
-        let mut options = vec![
+        let options = vec![
             "📋 List Accounts",
             "✨ Create New Account",
             "📥 Import Account",
             "🔍 View Validators",
             "📊 Overview (All Accounts)",
+            "💱 Swap Tokens",
+            "🪙 Check Supported Tokens",
             "❌ Quit",
         ];
 
@@ -906,6 +1006,181 @@ async fn run_interactive_mode_real(cfg: &mut Config) -> Result<()> {
             "📊 Overview (All Accounts)" => {
                 show_overview_table(&current_accounts, cfg).await?;
             },
+            "🪙 Check Supported Tokens" => {
+                 let network = if cfg.rpc_url.contains("sepolia") { AvnuNetwork::Sepolia } else { AvnuNetwork::Mainnet };
+                let client = AvnuClient::new(network);
+                println!("Fetching tokens...");
+                match client.get_tokens().await {
+                    Ok(tokens) => {
+                        let mut show_balance = false;
+                        let mut account_addr = String::new();
+                        
+                        // Ask to show balances
+                         if !current_accounts.is_empty() {
+                            let choices = vec!["No", "Yes"];
+                            if let Ok(choice) = Select::new("Show balances for an account?", choices).prompt() {
+                                if choice == "Yes" {
+                                     let account_options = current_accounts.iter().enumerate().map(|(i, acc)| {
+                                         let addr = Keystore::compute_address(acc, &cfg.oz_class_hash).unwrap_or_default();
+                                         let short = if addr.len() > 10 { format!("{}...", &addr[..10]) } else { addr };
+                                         format!("[{}] {}", i, short)
+                                     }).collect::<Vec<_>>();
+                                     
+                                     if let Ok(acc_choice) = Select::new("Select Account:", account_options).prompt() {
+                                         let acc_idx = acc_choice[1..].split(']').next().unwrap().parse::<usize>().unwrap();
+                                         if let Ok((addr, _, _)) = get_account_info(&acc_idx, &current_accounts, cfg) {
+                                             account_addr = addr;
+                                             show_balance = true;
+                                         }
+                                     }
+                                }
+                            }
+                        }
+
+                         let mut table = Table::new();
+                         if show_balance {
+                             table.load_preset(UTF8_FULL).set_header(vec!["Symbol", "Name", "Address", "Balance"]);
+                             println!("Fetching balances for {} (this may take a while)...", account_addr);
+                             
+                             let mut rows = Vec::new();
+                             // Fetch balances in parallel or sequential? Sequential is easier but slow.
+                             // Let's do sequential for now with a progress indicator or just printing as we go?
+                             // Table needs all rows.
+                             
+                             // We'll use a simple loop. Improving to parallel join_all would be better for 100+ tokens.
+                             // But let's stick to simple sequential for stability first, maybe limit to top 20 or user can wait.
+                             // Or use buffer/stream.
+                             
+                             for t in tokens {
+                                 print!("\rChecking {}...", t.symbol);
+                                 use std::io::Write;
+                                 std::io::stdout().flush().unwrap();
+                                 
+                                 let bal = network::get_token_balance(&cfg.rpc_url, &t.address, &account_addr, t.decimals).await.unwrap_or(0.0);
+                                 // Only show non-zero balances? Or all? User might want to see 0.
+                                 // Let's show all for now, or maybe filtering option. "Supported Tokens" implies list all.
+                                 
+                                 rows.push(vec![
+                                     t.symbol.clone(),
+                                     t.name.clone(),
+                                     t.address.clone(),
+                                     format!("{:.4}", bal)
+                                 ]);
+                             }
+                             println!("\rDone!          ");
+                             
+                             for row in rows {
+                                 table.add_row(row);
+                             }
+                             
+                         } else {
+                            table.load_preset(UTF8_FULL).set_header(vec!["Symbol", "Name", "Address"]);
+                            for t in tokens { table.add_row(vec![t.symbol, t.name, t.address]); }
+                         }
+                        println!("{table}");
+                    },
+                    Err(e) => println!("Error fetching tokens: {}", e),
+                }
+            },
+            "💱 Swap Tokens" => {
+                 // Interactive Swap Wizard
+                 let network = if cfg.rpc_url.contains("sepolia") { AvnuNetwork::Sepolia } else { AvnuNetwork::Mainnet };
+                 let client = AvnuClient::new(network);
+                 
+                 // 1. Select Account
+                 let account_options = current_accounts.iter().enumerate().map(|(i, acc)| {
+                     let addr = Keystore::compute_address(acc, &cfg.oz_class_hash).unwrap_or_default();
+                     let short = if addr.len() > 10 { format!("{}...", &addr[..10]) } else { addr };
+                     format!("[{}] {}", i, short)
+                 }).collect::<Vec<_>>();
+                 
+                 let acc_choice = Select::new("Select Account:", account_options).prompt();
+                 if acc_choice.is_err() { continue; }
+                 let acc_choice = acc_choice.unwrap();
+
+                 let acc_idx = acc_choice[1..].split(']').next().unwrap().parse::<usize>().unwrap();
+                 let (addr, priv_felt, _) = match get_account_info(&acc_idx, &current_accounts, cfg) {
+                     Ok(info) => info,
+                     Err(e) => { println!("Error getting account: {}", e); continue; }
+                 };
+                 
+                 // 2. Fetch Tokens
+                 println!("Fetching token list...");
+                 let tokens = match client.get_tokens().await {
+                     Ok(t) => t,
+                     Err(e) => { println!("Error fetching tokens: {}", e); continue; }
+                 };
+                 let token_options: Vec<String> = tokens.iter().map(|t| t.symbol.clone()).collect();
+                 
+                 // 3. Select Sell Token
+                 let sell_symbol = match Select::new("Sell Token:", token_options.clone()).prompt() {
+                     Ok(s) => s,
+                     Err(_) => continue,
+                 };
+                 let sell_token = tokens.iter().find(|t| t.symbol == sell_symbol).unwrap();
+                 
+                 // 4. Select Buy Token
+                 let buy_symbol = match Select::new("Buy Token:", token_options).prompt() {
+                     Ok(s) => s,
+                     Err(_) => continue,
+                 };
+                 let buy_token = tokens.iter().find(|t| t.symbol == buy_symbol).unwrap();
+                 
+                 // 5. Amount
+                 print!("Amount to Sell ({}): ", sell_symbol);
+                 io::stdout().flush()?;
+                 let mut input = String::new();
+                 io::stdin().read_line(&mut input)?;
+                 let amount: f64 = input.trim().parse().unwrap_or(0.0);
+                 
+                 if amount <= 0.0 { println!("Invalid amount"); continue; }
+                 
+                 // 6. Get Quote
+                 let amount_wei = (amount * 10f64.powi(sell_token.decimals as i32)).floor();
+                 let amount_str = format!("{:#x}", amount_wei as u128);
+                 
+                 match client.get_quote(&sell_token.address, &buy_token.address, &amount_str).await {
+                     Ok(quote) => {
+                          let buy_amt_val = u128::from_str_radix(quote.buy_amount.trim_start_matches("0x"), 16).unwrap_or(0);
+                          let buy_amt = buy_amt_val as f64 / 10f64.powi(buy_token.decimals as i32);
+                          println!("\n💱 Quote: {} {} -> {:.6} {}", amount, sell_symbol, buy_amt, buy_symbol);
+                          
+                          if Select::new("Confirm Swap?", vec!["Yes", "No"]).prompt().unwrap_or("No") == "Yes" {
+                              // Execute
+                              let calls = match client.build_swap(&quote.quote_id, &addr, 0.01, &sell_token.address, &amount_str).await { // 1% default
+                                  Ok(c) => c,
+                                  Err(e) => { println!("Error building swap: {}", e); continue; }
+                              };
+                              
+                                // Inline Execution
+                                use starknet::providers::{jsonrpc::HttpTransport, JsonRpcClient};
+                                use starknet::accounts::{SingleOwnerAccount, ExecutionEncoding, Account};
+                                use starknet::signers::LocalWallet;
+                                use url::Url;
+                                
+                                let url = Url::parse(&cfg.rpc_url).unwrap();
+                                let provider = JsonRpcClient::new(HttpTransport::new(url));
+                                let chain_id = provider.chain_id().await.unwrap();
+                                let signer = LocalWallet::from(SigningKey::from_secret_scalar(priv_felt));
+                                let sender_felt = Felt::from_hex(&addr).unwrap();
+                                
+                                let account_obj = SingleOwnerAccount::new(
+                                    provider,
+                                    signer,
+                                    sender_felt,
+                                    chain_id,
+                                    ExecutionEncoding::New,
+                                );
+                                
+                                match ui::with_spinner("Swapping...", account_obj.execute_v3(calls).send()).await {
+                                    Ok(tx) => println!("✅ Swap Sent: {:#x}", tx.transaction_hash),
+                                    Err(e) => println!("❌ Swap Failed: {}", e),
+                                }
+                          }
+                     },
+                     Err(e) => println!("❌ Failed to get quote: {}", e),
+                 }
+            },
             _ => {}
         }
     }
@@ -933,6 +1208,58 @@ async fn process_single_account_interactive(
     
     let balance = network::get_balance(&cfg.rpc_url, &cfg.strk_contract_address, &addr).await?;
     println!("{}{:.4}", cfg.messages.balance_label, balance);
+
+    // Check Dynamic Token Balances (AVNU)
+    use futures::stream::StreamExt;
+    
+    let network = if cfg.rpc_url.contains("sepolia") { AvnuNetwork::Sepolia } else { AvnuNetwork::Mainnet };
+    let client = AvnuClient::new(network);
+    
+    // Fetch tokens
+    if let Ok(tokens) = client.get_tokens().await {
+        // Only verify top 50 to avoid rate limits if list is huge, strictly 7 on Sepolia currently though.
+        let scan_tokens = tokens.into_iter().take(50).collect::<Vec<_>>();
+        if !scan_tokens.is_empty() {
+             println!("\n💰 Token Balances (Scanning {} tokens via AVNU)...", scan_tokens.len());
+             
+             // Define async task
+             let rpc_url = cfg.rpc_url.clone();
+             let user_addr = addr.clone();
+             
+             let fetch_balance = |token: Token| {
+                 let rpc = rpc_url.clone();
+                 let u_addr = user_addr.clone();
+                 async move {
+                     let bal = network::get_token_balance(&rpc, &token.address, &u_addr, token.decimals)
+                         .await.unwrap_or(0.0);
+                     (token, bal)
+                 }
+             };
+             
+             let mut stream = futures::stream::iter(scan_tokens)
+                 .map(|t| fetch_balance(t))
+                 .buffer_unordered(10); // 10 concurrent
+                 
+             let mut active_tokens = Vec::new();
+             while let Some((token, bal)) = stream.next().await {
+                 if bal > 0.0 {
+                     active_tokens.push((token.symbol, bal));
+                 }
+             }
+             
+             // Sort by symbol
+             active_tokens.sort_by(|a, b| a.0.cmp(&b.0));
+             
+             if !active_tokens.is_empty() {
+                 let mut table = Table::new();
+                 table.load_preset(UTF8_FULL).set_header(vec!["Token", "Balance"]);
+                 for (sym, bal) in active_tokens {
+                     table.add_row(vec![sym, format!("{:.4}", bal)]);
+                 }
+                 println!("{table}");
+             }
+        }
+    }
 
     // Check Staked Balance if default staker is configured
     if !cfg.default_staker_address.is_empty() {

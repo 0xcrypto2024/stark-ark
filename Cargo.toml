@@ -26,12 +26,14 @@ hex = "0.4"
 # 错误处理与工具
 anyhow = "1.0"
 uuid = { version = "1.0", features = ["v4"] }
+reqwest = { version = "0.11", features = ["blocking", "json"] }
 # Starknet 
 starknet ="0.17.0"
 rand="0.8.5"
 generic-array = "0.14.7"
 tokio = { version = "1.0", features = ["full"] }
 url = "2.5"
+futures = "0.3"
 
 # ✅ 新增：命令行参数解析
 clap = { version = "4.4", features = ["derive"] }

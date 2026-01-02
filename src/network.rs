@@ -17,11 +17,14 @@ pub struct AccountPoolInfo {
 
 // ==================== 查余额 ====================
 pub async fn get_balance(rpc_url: &str, strk_contract: &str, user_address_str: &str) -> Result<f64> {
+    get_token_balance(rpc_url, strk_contract, user_address_str, 18).await
+}
 
+pub async fn get_token_balance(rpc_url: &str, token_address_str: &str, user_address_str: &str, decimals: u32) -> Result<f64> {
     let url = Url::parse(rpc_url)?;
     let provider = JsonRpcClient::new(HttpTransport::new(url));
 
-    let contract_address = Felt::from_hex(strk_contract)?;
+    let contract_address = Felt::from_hex(token_address_str)?;
     let user_address = Felt::from_hex(user_address_str)?;
     let selector = get_selector_from_name("balanceOf")?;
 
@@ -34,9 +37,12 @@ pub async fn get_balance(rpc_url: &str, strk_contract: &str, user_address_str: &
     match provider.call(call_request, BlockId::Tag(BlockTag::Latest)).await {
         Ok(res) => {
             if res.len() >= 2 {
-                let low = res[0];
+                let low = res[0]; // Assuming U256 returns [low, high]
+                // For simplicity assuming balance fits in u128 (low part). 
+                // To be robust we should handle high part but f64 precision is limited anyway.
                 let balance_u128: u128 = match low.try_into() { Ok(val) => val, Err(_) => 0 };
-                Ok(balance_u128 as f64 / 1_000_000_000_000_000_000.0)
+                let divisor = 10f64.powi(decimals as i32);
+                Ok(balance_u128 as f64 / divisor)
             } else {
                 Ok(0.0)
             }
