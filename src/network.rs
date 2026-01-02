@@ -88,7 +88,7 @@ pub async fn deploy_account(
     ).await?;
 
     let deployment = factory.deploy_v3(public_key);
-    println!("{}", log_msg);
+    eprintln!("{}", log_msg);
     let result = deployment.send().await?;
 
     Ok(format!("{:#x}", result.transaction_hash))
@@ -139,9 +139,9 @@ pub async fn transfer_strk(
         ],
     };
 
-    println!("{}", log_msgs.0);
-    println!("{}{}", log_msgs.1, recipient_address);
-    println!("{}{}", log_msgs.2, amount);
+    eprintln!("{}", log_msgs.0);
+    eprintln!("{}{}", log_msgs.1, recipient_address);
+    eprintln!("{}{}", log_msgs.2, amount);
 
     // 4. 发送交易 (V3)
     let result = account
@@ -192,7 +192,7 @@ pub async fn multi_transfer_strk(
         });
     }
 
-    println!("{}", log_msg);
+    eprintln!("{}", log_msg);
 
     let result = account
         .execute_v3(calls)
@@ -320,23 +320,23 @@ pub async fn delegate_strk(
     if current_stake > 0.0 {
         // Existing staker: Use add_to_delegation_pool
         // Signature: add_to_delegation_pool(pool_member, amount)
-        println!("   -> Detecting existing stake of {} STRK. Adding to pool...", current_stake);
+        eprintln!("   -> Detecting existing stake of {} STRK. Adding to pool...", current_stake);
         calls.push(Call {
             to: pool_address_felt,
             selector: get_selector_from_name("add_to_delegation_pool")?,
             calldata: vec![sender_felt, amount_low],
         });
-        println!("   2. Add {} STRK to Delegation Pool", amount);
+        eprintln!("   2. Add {} STRK to Delegation Pool", amount);
     } else {
         // New staker: Use enter_delegation_pool
         // enter_delegation_pool(reward_address, amount)
-        println!("   -> New staker. Entering pool...");
+        eprintln!("   -> New staker. Entering pool...");
         calls.push(Call {
             to: pool_address_felt,
             selector: get_selector_from_name("enter_delegation_pool")?,
             calldata: vec![sender_felt, amount_low],
         });
-        println!("   2. Enter Delegation Pool with {} STRK", amount);
+        eprintln!("   2. Enter Delegation Pool with {} STRK", amount);
     }
 
     // 4. Send Transaction

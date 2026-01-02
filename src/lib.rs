@@ -6,3 +6,4 @@ pub mod backup;
 pub mod ui;
 pub mod avnu;
 pub mod session;
+pub mod mcp;

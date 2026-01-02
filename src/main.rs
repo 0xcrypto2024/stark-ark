@@ -173,6 +173,8 @@ enum Commands {
     },
     /// 🪙 List Supported Tokens (AVNU)
     Tokens,
+    /// 🤖 Run MCP Server (AI Agent Mode)
+    Mcp,
 }
 
 #[derive(Subcommand)]
@@ -240,7 +242,14 @@ async fn main() -> Result<()> {
 
     // 1. 初始化 UI 模式
     ui::set_json_mode(cli.json);
-    ui::print_banner();
+    
+    // Check if we are running in MCP mode
+    let is_mcp = matches!(cli.command, Some(Commands::Mcp));
+    
+    // Only print banner if NOT in MCP mode
+    if !is_mcp {
+        ui::print_banner();
+    }
 
     if let Some(path) = cli.keystore {
         cfg.keystore_file = path;
@@ -334,6 +343,27 @@ async fn run_cli_mode(cmd: &Commands, cfg: &Config) -> Result<()> {
     // 0. 处理不需要钱包解锁的命令
     match cmd {
         Commands::Config { .. } | Commands::Version => { return Ok(()); },
+        Commands::Mcp => {
+             let password = cfg.password.clone()
+                .or_else(|| env::var("STARK_ARK_PASSWORD").ok())
+                .ok_or_else(|| anyhow::anyhow!("STARK_ARK_PASSWORD environment variable is required for MCP mode."))?;
+
+             let keystore = Keystore::load(&cfg.keystore_file)?;
+             let accounts = keystore.decrypt(&password)?;
+             
+             if accounts.is_empty() {
+                return Err(anyhow::anyhow!("No accounts found. Please create one using 'new' or 'import' first via CLI."));
+            }
+            
+            let server = std::sync::Arc::new(stark_ark::mcp::McpServer::new(cfg.clone(), accounts));
+            eprintln!("🤖 StarkArk MCP Server Started.");
+            eprintln!("📍 Serving Address: {}", server.account_address());
+            
+            if let Err(e) = server.run().await {
+                eprintln!("❌ MCP Server Error: {}", e);
+            }
+            return Ok(());
+        },
         Commands::Tokens => {
             let network = if cfg.rpc_url.contains("sepolia") { AvnuNetwork::Sepolia } else { AvnuNetwork::Mainnet };
             let client = AvnuClient::new(network);

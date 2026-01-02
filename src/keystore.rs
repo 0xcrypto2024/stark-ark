@@ -26,7 +26,14 @@ pub struct AccountConfig {
 }
 
 impl Keystore {
-    /// 🔐 加密 (保存账户配置列表)
+    /// � 加载 Keystore 文件
+    pub fn load(path: &str) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let keystore: Self = serde_json::from_str(&content)?;
+        Ok(keystore)
+    }
+
+    /// �🔐 加密 (保存账户配置列表)
     pub fn encrypt(password: &str, accounts: &[AccountConfig]) -> Result<Self> {
         let mut rng = OsRng;
         let salt = SaltString::generate(&mut rng);

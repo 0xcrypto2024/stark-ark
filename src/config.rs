@@ -3,6 +3,7 @@ use anyhow::{Result, Context};
 use dotenv::{dotenv, from_path};
 use crate::i18n::Messages;
 
+#[derive(Clone, Debug)]
 pub struct Config {
     pub rpc_url: String,
     pub keystore_file: String,
@@ -13,6 +14,7 @@ pub struct Config {
     pub messages: Messages,
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
+    pub password: Option<String>,
 }
 
 impl Config {
@@ -77,6 +79,7 @@ impl Config {
             
             google_client_id: env::var("GOOGLE_CLIENT_ID").ok(),
             google_client_secret: env::var("GOOGLE_CLIENT_SECRET").ok(),
+            password: env::var("STARK_ARK_PASSWORD").ok(),
         })
     }
 
@@ -142,6 +145,14 @@ STAKING_CONTRACT_ADDRESS=0x03745ab04a431fc02871a139be6b93d9260b0ff3e779ad9c8b377
 
 # 6. 默认质押节点 (可选，为空时需手动输入)
 DEFAULT_STAKER_ADDRESS=
+
+# 7. 自动模式密码 (仅用于 MCP/AI Agent 模式，可选)
+# ⚠️ 警告：填写此项将允许无密码访问钱包！
+STARK_ARK_PASSWORD=
+
+# 8. Google Drive Backup
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
 
 LANGUAGE=en
 "#;

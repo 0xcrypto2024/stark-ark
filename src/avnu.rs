@@ -84,7 +84,7 @@ impl AvnuClient {
 
     pub async fn get_quote(&self, sell_token: &str, buy_token: &str, sell_amount_wei: &str) -> Result<QuoteResponse> {
         let url = format!("{}/swap/v1/quotes", self.base_url);
-        println!("DEBUG: Requesting quote: {} -> {} (Amount: {})", sell_token, buy_token, sell_amount_wei); // Log params
+        eprintln!("DEBUG: Requesting quote: {} -> {} (Amount: {})", sell_token, buy_token, sell_amount_wei); // Log params
         let resp: Vec<QuoteResponse> = self.client
             .get(&url)
             .query(&[
